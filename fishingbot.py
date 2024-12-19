@@ -120,7 +120,6 @@ COMMON_FISH = [
     ("Мелкий ерш", 1),
     ("Хилый ротан", 3),
     ("Мелкий минтай", 3),
-    # Новые обычные рыбы
     ("Мелкий пескарь", 2),
     ("Хилый голавлик", 3),
     ("Молодой карась", 2),
@@ -144,7 +143,6 @@ RARE_FISH = [
     ("Переливающийся сазан", 15),
     ("Средний сом", 14),
     ("Красивый щипун", 7),
-    # Новые редкие рыбы
     ("Красивый амур", 10),
     ("Переливающаяся белорыбица", 12),
     ("Средний сомик", 9),
@@ -390,7 +388,6 @@ def get_inventory_text(user_data):
 
     # Неопознанная рыба
     if any(count > 0 for count in unidentified.values()):
-        # Удаляем заголовок "**Неопознанные рыбы:**"
         if unidentified["common"] > 0:
             text += f"• Неопознанные рыбы - {unidentified['common']}\n"
         if unidentified["rare"] > 0:
@@ -416,7 +413,7 @@ def get_shop_text(user_data):
     identified_fish = {fish: qty for fish, qty in inventory.items() if fish in IDENTIFIED_FISH}
 
     if not identified_fish:
-        return "🏪 Добро пожаловать в магазин рыбака!\n\nУ вас нет опознаной рыбы для продажи. Идите ловите! 🎣"
+        return "🏪 Добро пожаловать в магазин рыбака!\n\nУ вас нет опознаной рыбы для продажи. Идите ловите! 🎣", 0
 
     text = "🏪 Добро пожаловать в магазин рыбака!\n\nВаш инвентарь:\n"
     total_weight = 0
@@ -776,15 +773,37 @@ async def pull_hook(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Определение редкости пойманной рыбы
         rarity = "common"
-        if fish_type == "Неопознанная рыба":
-            rarity = "common"
-        elif fish_type == "Неопознанная редкая рыба":
+        if fish_type == "Неопознанная редкая рыба":
             rarity = "rare"
         elif fish_type == "Неопознанная легендарная рыба":
             rarity = "legendary"
 
-        user_data["unidentified"][rarity] += 1
-        user_data["fishing"] = None  # Завершение процесса ловли
+        if fish_type not in IDENTIFIED_FISH:
+            logger.error(f"Identified fish '{fish_type}' not found in IDENTIFIED_FISH.")
+            await update.message.reply_text(
+                "❌ Ошибка при опознании рыбы. Попробуйте ещё раз позже.",
+                reply_markup=ReplyKeyboardMarkup(
+                    [
+                        [KeyboardButton(BUTTON_CATCH_FISH)],
+                        [KeyboardButton(BUTTON_GO_BACK)]
+                    ], resize_keyboard=True
+                )
+            )
+            user_data["fishing"] = None
+            return
+
+        # Добавление в инвентарь
+        inventory = user_data["inventory"]
+        inventory[fish_type] += 1
+        weight = IDENTIFIED_FISH[fish_type]
+        identification_results = [f"{fish_type} - {weight} КГ"]
+        logger.info(f"User {user.id} ({nickname}) caught {fish_type} and gained {xp_gained} XP.")
+
+        # Обновление накопленных показателей на основе фактического веса рыбы
+        user_data["total_kg_caught"] += weight
+
+        # Сброс состояния ловли
+        user_data["fishing"] = None
 
         # Добавление опыта
         user_data["experience"] += xp_gained
@@ -801,6 +820,7 @@ async def pull_hook(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Обновление ранга
         update_rank(user_data)
 
+        # Генерация сообщения
         if level_up:
             message = generate_fish_catch_message(fish_type, xp_gained, True, new_level, gold_reward)
         else:
@@ -815,816 +835,370 @@ async def pull_hook(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ], resize_keyboard=True
             )
         )
-        logger.info(f"User {user.id} ({nickname}) caught {fish_type} and gained {xp_gained} XP.")
-        if level_up:
-            logger.info(f"User {user.id} ({nickname}) leveled up to {new_level} and received {gold_reward} gold.")
-    else:
-        # Если нажал до времени окончания ловли
-        await update.message.reply_text(
-            "Эх, сорвалась! Попробуй ещё раз. 🎣",
-            reply_markup=ReplyKeyboardMarkup(
-                [
-                    [KeyboardButton(BUTTON_CATCH_FISH)],
-                    [KeyboardButton(BUTTON_GO_BACK)]
-                ], resize_keyboard=True
+        logger.info(f"User {user.id} ({nickname}) leveled up to {new_level} and received {gold_reward} gold." if level_up else f"User {user.id} ({nickname}) did not level up.")
+
+    # Хендлер для Опознания рыбы
+    async def identify_fish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        user_data = users_data[user.id]
+        unidentified = user_data["unidentified"]
+        nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
+
+        logger.info(f"User {user.id} ({nickname}) is attempting to identify fish.")
+
+        if all(count == 0 for count in unidentified.values()):
+            await update.message.reply_text(
+                "❗ У вас нет неопознанной рыбы для опознания. Идите ловите! 🎣",
+                reply_markup=inventory_menu_keyboard()
             )
-        )
-        logger.info(f"User {user.id} ({nickname}) pulled hook before time.")
-        user_data["fishing"] = None  # Завершение процесса ловли
+            logger.warning(f"User {user.id} ({nickname}) has no unidentified fish.")
+            return
 
-# Хендлер для Опознания рыбы
-async def identify_fish(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_data = users_data[user.id]
-    unidentified = user_data["unidentified"]
-    nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
+        inventory = user_data["inventory"]
+        identification_results = []
+        for rarity, count in unidentified.items():
+            for _ in range(count):
+                if rarity == "common":
+                    identified_fish = random.choice(COMMON_FISH)[0]
+                elif rarity == "rare":
+                    identified_fish = random.choice(RARE_FISH)[0]
+                elif rarity == "legendary":
+                    identified_fish = random.choice(LEGENDARY_FISH)[0]
+                else:
+                    identified_fish = "Неизвестная рыба"  # На случай неизвестной редкости
 
-    logger.info(f"User {user.id} ({nickname}) is attempting to identify fish.")
+                # Проверяем, что рыба есть в IDENTIFIED_FISH
+                if identified_fish not in IDENTIFIED_FISH:
+                    logger.error(f"Identified fish '{identified_fish}' not found in IDENTIFIED_FISH.")
+                    continue
 
-    if all(count == 0 for count in unidentified.values()):
+                # Добавляем рыбу в инвентарь безопасным способом
+                inventory[identified_fish] = inventory.get(identified_fish, 0) + 1
+
+                weight = IDENTIFIED_FISH.get(identified_fish, 0)
+                identification_results.append(f"{identified_fish} - {weight} КГ")
+                logger.info(f"User {user.id} ({nickname}) identified {identified_fish} with weight {weight} КГ.")
+
+                # Обновление накопленных показателей на основе фактического веса рыбы
+                user_data["total_kg_caught"] += weight
+
+        # Сброс неопознанных рыб
+        user_data["unidentified"] = {"common": 0, "rare": 0, "legendary": 0}
         await update.message.reply_text(
-            "❗ У вас нет неопознанной рыбы для опознания. Идите ловите! 🎣",
+            "✅ Все неопознанные рыбы успешно опознаны! 🐟\n\nВы получили:\n" + "\n".join(identification_results),
             reply_markup=inventory_menu_keyboard()
         )
-        logger.warning(f"User {user.id} ({nickname}) has no unidentified fish.")
-        return
 
-    inventory = user_data["inventory"]
-    identification_results = []
-    for rarity, count in unidentified.items():
-        for _ in range(count):
-            if rarity == "common":
-                identified_fish = random.choice(COMMON_FISH)[0]
-            elif rarity == "rare":
-                identified_fish = random.choice(RARE_FISH)[0]
-            elif rarity == "legendary":
-                identified_fish = random.choice(LEGENDARY_FISH)[0]
-            else:
-                identified_fish = "Неизвестная рыба"  # На случай неизвестной редкости
-            # Убедимся, что identified_fish присутствует в IDENTIFIED_FISH
-            if identified_fish not in IDENTIFIED_FISH:
-                logger.error(f"Identified fish '{identified_fish}' not found in IDENTIFIED_FISH.")
-                continue
-            inventory[identified_fish] += 1
-            weight = IDENTIFIED_FISH.get(identified_fish, 0)
-            identification_results.append(f"{identified_fish} - {weight} КГ")
-            logger.info(f"User {user.id} ({nickname}) identified {identified_fish} with weight {weight} КГ.")
-
-            # Обновление накопленных показателей на основе фактического веса рыбы
-            user_data["total_kg_caught"] += weight
-
-    # Сброс неопознанных рыб
-    user_data["unidentified"] = {"common": 0, "rare": 0, "legendary": 0}
-    await update.message.reply_text(
-        "✅ Все неопознанные рыбы успешно опознаны! 🐟\n\nВы получили:\n" + "\n".join(identification_results),
-        reply_markup=inventory_menu_keyboard()
-    )
-
-# Хендлер для Инвентаря
-async def inventory(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_data = users_data[user.id]
-    inventory_text = get_inventory_text(user_data)
-    nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
-    logger.info(f"User {user.id} ({nickname}) viewed inventory.")
-    await update.message.reply_text(
-        inventory_text,
-        reply_markup=inventory_menu_keyboard()
-    )
-
-# Хендлер для Магазина
-async def shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_data = users_data[user.id]
-    shop_info = get_shop_text(user_data)
-
-    if isinstance(shop_info, tuple):
-        text, gold = shop_info
-    else:
-        text = shop_info
-        gold = 0
-
-    await update.message.reply_text(
-        text,
-        reply_markup=shop_menu_keyboard()
-    )
-
-    # Сохраняем сумму золота для продажи
-    if gold > 0:
-        user_data["shop_gold"] = gold
-    else:
-        user_data["shop_gold"] = 0
-    nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
-    logger.info(f"User {user.id} ({nickname}) viewed shop. Potential gold: {gold}.")
-
-# Хендлер для продажи рыбы
-async def sell_fish(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_data = users_data[user.id]
-    inventory = user_data["inventory"]
-    identified_fish = {fish: qty for fish, qty in inventory.items() if fish in IDENTIFIED_FISH}
-    nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
-
-    if not identified_fish:
+    # Хендлер для Инвентаря
+    async def inventory_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        user_data = users_data[user.id]
+        inventory_text = get_inventory_text(user_data)
+        nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
+        logger.info(f"User {user.id} ({nickname}) viewed inventory.")
         await update.message.reply_text(
-            "❗ У вас нет опознаной рыбы для продажи. Идите ловите! 🎣",
+            inventory_text,
+            reply_markup=inventory_menu_keyboard()
+        )
+
+    # Хендлер для Магазина
+    async def shop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        user_data = users_data[user.id]
+        shop_info = get_shop_text(user_data)
+
+        if isinstance(shop_info, tuple):
+            text, gold = shop_info
+        else:
+            text = shop_info
+            gold = 0
+
+        await update.message.reply_text(
+            text,
             reply_markup=shop_menu_keyboard()
         )
-        logger.warning(f"User {user.id} ({nickname}) has no identified fish to sell.")
-        return
 
-    # Расчёт суммы золота
-    total_weight = sum(IDENTIFIED_FISH[fish] * qty for fish, qty in identified_fish.items())
-    gold_earned = int(total_weight * pi / 4)
+        # Сохраняем сумму золота для продажи
+        if gold > 0:
+            user_data["shop_gold"] = gold
+        else:
+            user_data["shop_gold"] = 0
+        nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
+        logger.info(f"User {user.id} ({nickname}) viewed shop. Potential gold: {gold}.")
 
-    # Продажа рыбы
-    for fish, qty in identified_fish.items():
-        inventory[fish] = 0
-    # Удаление рыб с нулевым количеством
-    inventory = {fish: qty for fish, qty in inventory.items() if qty > 0}
-    user_data["inventory"] = inventory
-    user_data["gold"] += gold_earned
-    user_data["total_gold_earned"] += gold_earned
+    # Хендлер для продажи рыбы
+    async def sell_fish_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        user_data = users_data[user.id]
+        inventory = user_data["inventory"]
+        identified_fish = {fish: qty for fish, qty in inventory.items() if fish in IDENTIFIED_FISH}
+        nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
 
-    await update.message.reply_text(
-        f"💰 Вы продали всю рыбу за {gold_earned} золота! 🎉",
-        reply_markup=shop_menu_keyboard()
-    )
-    logger.info(f"User {user.id} ({nickname}) sold fish for {gold_earned} gold.")
-
-# Хендлер для Обменять золото
-async def exchange_gold(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_data = users_data[user.id]
-    gold = user_data["gold"]
-    exchange_rate = 700  # 1 TON = 700 золота
-    minimum_gold = 25000  # Изменено с 5000 на 25000
-    nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
-
-    logger.info(f"User {user.id} ({nickname}) requested gold exchange.")
-
-    if gold >= minimum_gold:
-        keyboard = [
-            [KeyboardButton(BUTTON_CONFIRM_YES), KeyboardButton(BUTTON_CONFIRM_NO)]
-        ]
-        await update.message.reply_text(
-            f"💱 Текущий курс обмена золота на TON составляет 1 TON = {exchange_rate} золота.\n"
-            "Совершить обмен? 🔄",
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        )
-    else:
-        needed = minimum_gold - gold
-        keyboard = [
-            [KeyboardButton(BUTTON_CONFIRM_NOT_ENOUGH)],
-            [KeyboardButton(BUTTON_CONFIRM_NO)]
-        ]
-        await update.message.reply_text(
-            f"💱 Текущий курс обмена золота на TON составляет 1 TON = {exchange_rate} золота.\n"
-            f"Нехватает ещё {needed} золота для обмена.",
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        )
-        logger.warning(f"User {user.id} ({nickname}) does not have enough gold for exchange. Needs {needed} more gold.")
-
-# Хендлер для подтверждения обмена
-async def confirm_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_data = users_data[user.id]
-    gold = user_data["gold"]
-    exchange_rate = 700
-    minimum_gold = 25000  # Изменено с 5000 на 25000
-    nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
-
-    logger.info(f"User {user.id} ({nickname}) is confirming exchange: {update.message.text}")
-
-    if update.message.text == BUTTON_CONFIRM_YES:
-        if gold >= minimum_gold:
-            user_data["gold"] -= minimum_gold
-            ton = minimum_gold / exchange_rate
-            ton = round(ton, 2)
+        if not identified_fish:
             await update.message.reply_text(
-                f"🔄 Обмен произведён успешно! Вы получили {ton} TON. Пока тестируем! 🛠️",
+                "❗ У вас нет опознаной рыбы для продажи. Идите ловите! 🎣",
                 reply_markup=shop_menu_keyboard()
             )
-            logger.info(f"User {user.id} ({nickname}) exchanged {minimum_gold} gold for {ton} TON.")
+            logger.warning(f"User {user.id} ({nickname}) has no identified fish to sell.")
+            return
+
+        # Расчёт суммы золота
+        total_weight = sum(IDENTIFIED_FISH[fish] * qty for fish, qty in identified_fish.items())
+        gold_earned = int(total_weight * pi / 4)
+
+        # Продажа рыбы
+        for fish, qty in identified_fish.items():
+            inventory[fish] = 0
+        # Обновление инвентаря без конвертации в обычный dict
+        # Чтобы избежать KeyError, просто оставляем только те рыбы, которые ещё есть
+        for fish in list(inventory.keys()):
+            if inventory[fish] <= 0:
+                del inventory[fish]
+        user_data["gold"] += gold_earned
+        user_data["total_gold_earned"] += gold_earned
+
+        await update.message.reply_text(
+            f"💰 Вы продали всю рыбу за {gold_earned} золота! 🎉",
+            reply_markup=shop_menu_keyboard()
+        )
+        logger.info(f"User {user.id} ({nickname}) sold fish for {gold_earned} gold.")
+
+    # Хендлер для Обменять золото
+    async def exchange_gold_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        user_data = users_data[user.id]
+        gold = user_data["gold"]
+        exchange_rate = 700  # 1 TON = 700 золота
+        minimum_gold = 25000  # Изменено с 5000 на 25000
+        nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
+
+        logger.info(f"User {user.id} ({nickname}) requested gold exchange.")
+
+        if gold >= minimum_gold:
+            keyboard = [
+                [KeyboardButton(BUTTON_CONFIRM_YES), KeyboardButton(BUTTON_CONFIRM_NO)]
+            ]
+            await update.message.reply_text(
+                f"💱 Текущий курс обмена золота на TON составляет 1 TON = {exchange_rate} золота.\n"
+                "Совершить обмен? 🔄",
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            )
         else:
+            needed = minimum_gold - gold
+            keyboard = [
+                [KeyboardButton(BUTTON_CONFIRM_NOT_ENOUGH)],
+                [KeyboardButton(BUTTON_CONFIRM_NO)]
+            ]
+            await update.message.reply_text(
+                f"💱 Текущий курс обмена золота на TON составляет 1 TON = {exchange_rate} золота.\n"
+                f"Нехватает ещё {needed} золота для обмена.",
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            )
+            logger.warning(f"User {user.id} ({nickname}) does not have enough gold for exchange. Needs {needed} more gold.")
+
+    # Хендлер для подтверждения обмена
+    async def confirm_exchange_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        user_data = users_data[user.id]
+        gold = user_data["gold"]
+        exchange_rate = 700
+        minimum_gold = 25000  # Изменено с 5000 на 25000
+        nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
+
+        logger.info(f"User {user.id} ({nickname}) is confirming exchange: {update.message.text}")
+
+        if update.message.text == BUTTON_CONFIRM_YES:
+            if gold >= minimum_gold:
+                user_data["gold"] -= minimum_gold
+                ton = minimum_gold / exchange_rate
+                ton = round(ton, 2)
+                await update.message.reply_text(
+                    f"🔄 Обмен произведён успешно! Вы получили {ton} TON. Пока тестируем! 🛠️",
+                    reply_markup=shop_menu_keyboard()
+                )
+                logger.info(f"User {user.id} ({nickname}) exchanged {minimum_gold} gold for {ton} TON.")
+            else:
+                needed = minimum_gold - gold
+                await update.message.reply_text(
+                    f"❗ Нехватает ещё {needed} золота для обмена.",
+                    reply_markup=shop_menu_keyboard()
+                )
+                logger.warning(f"User {user.id} ({nickname}) tried to exchange but lacks {needed} gold.")
+        elif update.message.text == BUTTON_CONFIRM_NOT_ENOUGH:
             needed = minimum_gold - gold
             await update.message.reply_text(
                 f"❗ Нехватает ещё {needed} золота для обмена.",
                 reply_markup=shop_menu_keyboard()
             )
-            logger.warning(f"User {user.id} ({nickname}) tried to exchange but lacks {needed} gold.")
-    elif update.message.text == BUTTON_CONFIRM_NOT_ENOUGH:
-        needed = minimum_gold - gold
-        await update.message.reply_text(
-            f"❗ Нехватает ещё {needed} золота для обмена.",
-            reply_markup=shop_menu_keyboard()
-        )
-        logger.warning(f"User {user.id} ({nickname}) lacks {needed} gold for exchange.")
-    elif update.message.text == BUTTON_CONFIRM_NO:
-        await update.message.reply_text(
-            "❌ Обмен отменён.",
-            reply_markup=shop_menu_keyboard()
-        )
-        logger.info(f"User {user.id} ({nickname}) cancelled the exchange.")
-    else:
-        await update.message.reply_text(
-            "❗ Неизвестная команда. Пожалуйста, используйте кнопки ниже.",
-            reply_markup=shop_menu_keyboard()
-        )
-        logger.error(f"User {user.id} ({nickname}) sent an unknown response for exchange: {update.message.text}")
-
-# Хендлер для "Вернуться"
-async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_data = users_data[user.id]
-    nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
-    logger.info(f"User {user.id} ({nickname}) is returning to main menu.")
-    await update.message.reply_text(
-        "🔙 Возвращение в главное меню.",
-        reply_markup=main_menu_keyboard()
-    )
-    return ConversationHandler.END
-
-# Хендлер для Таблицы Лидеров
-async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_data = users_data[user.id]
-    nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
-    logger.info(f"User {user.id} ({nickname}) accessed the leaderboard.")
-    await update.message.reply_text(
-        "🏆 **Таблица Лидеров** 🏆\n\n"
-        "На этой доске славы изображены лучшие из лучших!\n\n"
-        "Выберите категорию, чтобы посмотреть лидеров:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=leaderboard_menu_keyboard()
-    )
-
-# Хендлер для отображения Лидеров по Золоту
-async def leaderboard_total_gold(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    leaderboard_data = sorted(users_data.items(), key=lambda x: x[1]["total_gold_earned"], reverse=True)
-    top_users = leaderboard_data[:10]  # Топ 10
-
-    if not top_users:
-        leaderboard_text = "🏆 Таблица лидеров пуста. Начните играть, чтобы попасть сюда! 🐟"
-    else:
-        leaderboard_text = "**🏆 Топ 10 по Всего заработано золота 🏆**\n\n"
-        for idx, (uid, data) in enumerate(top_users, start=1):
-            # Получение ника пользователя
-            nickname = data["nickname"] if data["nickname"] else "Неизвестный пользователь"
-            leaderboard_text += f"{idx}. {nickname} - {data['total_gold_earned']} золота\n"
-
-    leaderboard_text += "\n📜 На этой доске славы отображаются лучшие из лучших! Продолжайте играть и поднимайтесь в рейтинге! 🎉"
-
-    await update.message.reply_text(
-        leaderboard_text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=leaderboard_menu_keyboard()
-    )
-
-# Хендлер для отображения Лидеров по КГ Рыбы
-async def leaderboard_total_kg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    leaderboard_data = sorted(users_data.items(), key=lambda x: x[1]["total_kg_caught"], reverse=True)
-    top_users = leaderboard_data[:10]  # Топ 10
-
-    if not top_users:
-        leaderboard_text = "🏆 Таблица лидеров пуста. Начните играть, чтобы попасть сюда! 🐟"
-    else:
-        leaderboard_text = "**🏆 Топ 10 по Всего поймано КГ рыбы 🏆**\n\n"
-        for idx, (uid, data) in enumerate(top_users, start=1):
-            # Получение ника пользователя
-            nickname = data["nickname"] if data["nickname"] else "Неизвестный пользователь"
-            leaderboard_text += f"{idx}. {nickname} - {data['total_kg_caught']} КГ рыбы\n"
-
-    leaderboard_text += "\n📜 На этой доске славы отображаются лучшие из лучших! Продолжайте играть и поднимайтесь в рейтинге! 🎉"
-
-    await update.message.reply_text(
-        leaderboard_text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=leaderboard_menu_keyboard()
-    )
-
-# Хендлер для отображения Лидеров по Опыту
-async def leaderboard_total_experience(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    leaderboard_data = sorted(users_data.items(), key=lambda x: x[1]["experience"], reverse=True)
-    top_users = leaderboard_data[:10]  # Топ 10
-
-    if not top_users:
-        leaderboard_text = "🏆 Таблица лидеров пуста. Начните играть, чтобы попасть сюда! 🐟"
-    else:
-        leaderboard_text = "**🏆 Топ 10 по Опыт 🏆**\n\n"
-        for idx, (uid, data) in enumerate(top_users, start=1):
-            # Получение ника пользователя
-            nickname = data["nickname"] if data["nickname"] else "Неизвестный пользователь"
-            leaderboard_text += f"{idx}. {nickname} - {data['experience']} XP\n"
-
-    leaderboard_text += "\n📜 На этой доске славы отображаются лучшие из лучших! Продолжайте играть и поднимайтесь в рейтинге! 🎉"
-
-    await update.message.reply_text(
-        leaderboard_text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=leaderboard_menu_keyboard()
-    )
-
-# Обработчик для главной таблицы лидеров
-async def handle_leaderboard_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if text == BUTTON_LEADERBOARD:
-        await leaderboard(update, context)
-    elif text == BUTTON_TOTAL_GOLD:
-        await leaderboard_total_gold(update, context)
-    elif text == BUTTON_TOTAL_KG:
-        await leaderboard_total_kg(update, context)
-    elif text == BUTTON_TOTAL_EXPERIENCE:
-        await leaderboard_total_experience(update, context)
-    else:
-        # Другие команды обрабатываются в основном хендлере
-        pass
-
-# Функция для раздела Удочек
-async def rods_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_data = users_data[user.id]
-    text = (
-        "🎣 **Удочки** 🎣\n\n"
-        "Продавец показывает вам последние модели удочек.\n\n"
-        "Доступные удочки:\n"
-    )
-    for rod in RODS:
-        text += f"- {rod['name']} - {rod['price']} золота (уменьшение времени рыбалки на {rod['bonus_percent']}%)\n"
-
-    text += "\nВыберите удочку, которую хотите купить:"
-    keyboard = [[KeyboardButton(rod["name"])] for rod in RODS]
-    keyboard.append([KeyboardButton(BUTTON_GO_BACK)])
-    await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    )
-    return BUY_ROD
-
-# Хендлер для покупки удочки
-async def buy_rod(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    selected_rod_name = update.message.text.strip()
-    rod = next((r for r in RODS if r["name"] == selected_rod_name), None)
-    user = update.effective_user
-    user_data = users_data[user.id]
-    nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
-
-    if rod:
-        user_data["pending_purchase"] = {"type": "rod", "rod": rod}
-        await update.message.reply_text(
-            f"❓ Купить {rod['name']} за {rod['price']} золота?",
-            reply_markup=ReplyKeyboardMarkup(
-                [[KeyboardButton(BUTTON_CONFIRM_YES), KeyboardButton(BUTTON_CONFIRM_NO)]],
-                resize_keyboard=True
+            logger.warning(f"User {user.id} ({nickname}) lacks {needed} gold for exchange.")
+        elif update.message.text == BUTTON_CONFIRM_NO:
+            await update.message.reply_text(
+                "❌ Обмен отменён.",
+                reply_markup=shop_menu_keyboard()
             )
-        )
-        logger.info(f"User {user.id} ({nickname}) is attempting to buy rod '{rod['name']}' for {rod['price']} gold.")
-        return CONFIRM_BUY_ROD
-    else:
-        await update.message.reply_text(
-            "❗ Неизвестная удочка. Пожалуйста, выберите удочку из списка.",
-            reply_markup=ReplyKeyboardMarkup(
-                [[KeyboardButton(r["name"]) for r in RODS], [KeyboardButton(BUTTON_GO_BACK)]],
-                resize_keyboard=True
+            logger.info(f"User {user.id} ({nickname}) cancelled the exchange.")
+        else:
+            await update.message.reply_text(
+                "❗ Неизвестная команда. Пожалуйста, используйте кнопки ниже.",
+                reply_markup=shop_menu_keyboard()
             )
+            logger.error(f"User {user.id} ({nickname}) sent an unknown response for exchange: '{update.message.text}'")
+
+    # Хендлер для "Вернуться"
+    async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        user_data = users_data[user.id]
+        nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
+        logger.info(f"User {user.id} ({nickname}) is returning to main menu.")
+        await update.message.reply_text(
+            "🔙 Возвращение в главное меню.",
+            reply_markup=main_menu_keyboard()
         )
-        logger.warning(f"User {user.id} ({nickname}) selected an unknown rod: '{selected_rod_name}'.")
-        return BUY_ROD
+        return ConversationHandler.END
 
-# Хендлер для подтверждения покупки удочки
-async def confirm_buy_rod(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    confirmation = update.message.text.strip()
-    user = update.effective_user
-    user_data = users_data[user.id]
-    nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
-    rod = user_data.get("pending_purchase", {}).get("rod")
+    # Хендлер для Таблицы Лидеров
+    async def leaderboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        text = update.message.text.strip()
+        if text == BUTTON_LEADERBOARD:
+            await leaderboard(update, context)
+        elif text == BUTTON_TOTAL_GOLD:
+            await leaderboard_total_gold(update, context)
+        elif text == BUTTON_TOTAL_KG:
+            await leaderboard_total_kg(update, context)
+        elif text == BUTTON_TOTAL_EXPERIENCE:
+            await leaderboard_total_experience(update, context)
+        else:
+            await update.message.reply_text(
+                "❗ Неизвестная команда.",
+                reply_markup=main_menu_keyboard()
+            )
+            logger.warning(f"User {update.effective_user.id} sent unknown leaderboard command: '{text}'")
 
-    if confirmation == BUTTON_CONFIRM_YES and rod:
-        if user_data["gold"] >= rod["price"]:
-            # Проверка, если текущая удочка хуже новой
-            current_bonus = user_data["current_rod"]["bonus_percent"]
-            if rod["bonus_percent"] > current_bonus:
-                # Заменяем удочку
-                user_data["gold"] -= rod["price"]
-                previous_rod = user_data["current_rod"]["name"]
-                user_data["current_rod"] = {"name": rod["name"], "bonus_percent": rod["bonus_percent"]}
+    ###############################################################
+    # ОБРАБОТЧИКИ ГИЛЬДИЙ
+    ###############################################################
+
+    # (Ваши функции для работы с гильдиями должны быть здесь, если они есть)
+
+    ###############################################################
+    # ОБРАБОТЧИКИ КОМАНД И МЕНЮ
+    ###############################################################
+
+    # Обработчик текстовых сообщений
+    async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        text = update.message.text.strip()
+        user = update.effective_user
+        user_data = users_data[user.id]
+        nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
+
+        # Проверка истечения времени действия наживки при каждом взаимодействии
+        current_bait = user_data["current_bait"]
+        if current_bait:
+            if datetime.utcnow() >= current_bait["end_time"]:
+                user_data["current_bait"] = None
                 await update.message.reply_text(
-                    f"✅ Вы купили {rod['name']} за {rod['price']} золота и заменили {previous_rod}.",
-                    reply_markup=shop_menu_keyboard()
+                    "🪱 Ваша наживка истекла.",
+                    reply_markup=inventory_menu_keyboard()
                 )
-                logger.info(f"User {user.id} ({nickname}) bought rod '{rod['name']}' and replaced '{previous_rod}'.")
-            elif rod["bonus_percent"] < current_bonus:
-                # Запрос подтверждения замены на более слабую удочку
-                user_data["pending_purchase"] = {"type": "rod_replace", "rod": rod}
-                await update.message.reply_text(
-                    f"⚠️ Вы точно хотите поменять удочку {user_data['current_rod']['name']} на {rod['name']}? "
-                    f"Текущая удочка будет уничтожена!",
-                    reply_markup=ReplyKeyboardMarkup(
-                        [[KeyboardButton(BUTTON_CONFIRM_YES), KeyboardButton(BUTTON_CONFIRM_NO)]],
-                        resize_keyboard=True
-                    )
-                )
-                logger.info(f"User {user.id} ({nickname}) is attempting to replace rod '{user_data['current_rod']['name']}' with weaker rod '{rod['name']}'.")
-                return CONFIRM_REPLACE_ROD
-            else:
-                # То же самое бонус, просто заменяем
-                user_data["gold"] -= rod["price"]
-                user_data["current_rod"] = {"name": rod["name"], "bonus_percent": rod["bonus_percent"]}
-                await update.message.reply_text(
-                    f"✅ Вы купили {rod['name']} за {rod['price']} золота.",
-                    reply_markup=shop_menu_keyboard()
-                )
-                logger.info(f"User {user.id} ({nickname}) bought rod '{rod['name']}' with same bonus.")
-        else:
-            await update.message.reply_text(
-                "❌ Недостаточно золота для покупки этой удочки.",
-                reply_markup=shop_menu_keyboard()
-            )
-            logger.warning(f"User {user.id} ({nickname}) does not have enough gold to buy rod '{rod['name']}'.")
-        user_data["pending_purchase"] = None
-        return ConversationHandler.END
-    elif confirmation == BUTTON_CONFIRM_NO:
-        if user_data.get("pending_purchase", {}).get("type") == "rod_replace":
-            await update.message.reply_text(
-                "❌ Замена удочки отменена.",
-                reply_markup=shop_menu_keyboard()
-            )
-            logger.info(f"User {user.id} ({nickname}) cancelled rod replacement.")
-        else:
-            await update.message.reply_text(
-                "❌ Покупка удочки отменена.",
-                reply_markup=shop_menu_keyboard()
-            )
-            logger.info(f"User {user.id} ({nickname}) cancelled rod purchase.")
-        user_data["pending_purchase"] = None
-        return ConversationHandler.END
-    else:
-        await update.message.reply_text(
-            "❗ Неизвестная команда. Пожалуйста, используйте кнопки ниже.",
-            reply_markup=shop_menu_keyboard()
-        )
-        logger.error(f"User {user.id} ({nickname}) sent an unknown confirmation: '{confirmation}'.")
-        return ConversationHandler.END
+                logger.info(f"User {user.id} ({nickname})'s bait has expired.")
 
-# Хендлер для подтверждения замены удочки на более слабую
-async def confirm_replace_rod(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    confirmation = update.message.text.strip()
-    user = update.effective_user
-    user_data = users_data[user.id]
-    nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
-    rod = user_data.get("pending_purchase", {}).get("rod")
+        logger.info(f"Received message from user {user.id} ({nickname}): {update.message.text}")
 
-    if confirmation == BUTTON_CONFIRM_YES and rod:
-        if user_data["gold"] >= rod["price"]:
-            previous_rod = user_data["current_rod"]["name"]
-            user_data["gold"] -= rod["price"]
-            user_data["current_rod"] = {"name": rod["name"], "bonus_percent": rod["bonus_percent"]}
-            await update.message.reply_text(
-                f"✅ Вы поменяли удочку {previous_rod} на {rod['name']} за {rod['price']} золота.",
-                reply_markup=shop_menu_keyboard()
-            )
-            logger.info(f"User {user.id} ({nickname}) replaced rod '{previous_rod}' with '{rod['name']}'.")
-        else:
-            await update.message.reply_text(
-                "❌ Недостаточно золота для покупки этой удочки.",
-                reply_markup=shop_menu_keyboard()
-            )
-            logger.warning(f"User {user.id} ({nickname}) does not have enough gold to replace rod with '{rod['name']}'.")
-        user_data["pending_purchase"] = None
-        return ConversationHandler.END
-    elif confirmation == BUTTON_CONFIRM_NO:
-        await update.message.reply_text(
-            "❌ Замена удочки отменена.",
-            reply_markup=shop_menu_keyboard()
-        )
-        logger.info(f"User {user.id} ({nickname}) cancelled rod replacement.")
-        user_data["pending_purchase"] = None
-        return ConversationHandler.END
-    else:
-        await update.message.reply_text(
-            "❗ Неизвестная команда. Пожалуйста, используйте кнопки ниже.",
-            reply_markup=shop_menu_keyboard()
-        )
-        logger.error(f"User {user.id} ({nickname}) sent an unknown confirmation for rod replacement: '{confirmation}'.")
-        return ConversationHandler.END
-
-# Хендлер для раздела Наживок
-async def baits_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_data = users_data[user.id]
-    text = (
-        "🪱 **Наживки** 🪱\n\n"
-        "Продавец ставит поддон, в котором много разных наживок для любой цели! Говорят, что наживки помогают поймать больше рыбы! Но так ли это..\n\n"
-        "Доступные наживки:\n"
-    )
-    for bait in BAITS:
-        text += f"- {bait['name']} - {bait['price']} золота (действует час)\n"
-
-    text += "\nВыберите наживку, которую хотите купить:"
-    keyboard = [[KeyboardButton(bait["name"])] for bait in BAITS]
-    keyboard.append([KeyboardButton(BUTTON_GO_BACK)])
-    await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    )
-    return BUY_BAIT
-
-# Хендлер для покупки наживки
-async def buy_bait(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    selected_bait_name = update.message.text.strip()
-    bait = next((b for b in BAITS if b["name"] == selected_bait_name), None)
-    user = update.effective_user
-    user_data = users_data[user.id]
-    nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
-
-    if bait:
-        user_data["pending_purchase"] = {"type": "bait", "bait": bait}
-        await update.message.reply_text(
-            f"❓ Купить {bait['name']} за {bait['price']} золота? (действует 1 час)",
-            reply_markup=ReplyKeyboardMarkup(
-                [[KeyboardButton(BUTTON_CONFIRM_YES), KeyboardButton(BUTTON_CONFIRM_NO)]],
-                resize_keyboard=True
-            )
-        )
-        logger.info(f"User {user.id} ({nickname}) is attempting to buy bait '{bait['name']}' for {bait['price']} gold.")
-        return CONFIRM_BUY_BAIT
-    else:
-        await update.message.reply_text(
-            "❗ Неизвестная наживка. Пожалуйста, выберите наживку из списка.",
-            reply_markup=ReplyKeyboardMarkup(
-                [[KeyboardButton(b["name"]) for b in BAITS], [KeyboardButton(BUTTON_GO_BACK)]],
-                resize_keyboard=True
-            )
-        )
-        logger.warning(f"User {user.id} ({nickname}) selected an unknown bait: '{selected_bait_name}'.")
-        return BUY_BAIT
-
-# Хендлер для подтверждения покупки наживки
-async def confirm_buy_bait(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    confirmation = update.message.text.strip()
-    user = update.effective_user
-    user_data = users_data[user.id]
-    nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
-    bait = user_data.get("pending_purchase", {}).get("bait")
-
-    if confirmation == BUTTON_CONFIRM_YES and bait:
-        if user_data["gold"] >= bait["price"]:
-            # Проверка наличия активной наживки
-            current_bait = user_data["current_bait"]
-            if current_bait:
-                # Проверка, дешевле ли новая наживка
-                new_bait_cost = bait["price"]
-                current_bait_cost = next((b["price"] for b in BAITS if b["name"] == current_bait["name"]), 0)
-                if new_bait_cost < current_bait_cost:
-                    # Запрос подтверждения замены
-                    remaining_time = int((current_bait["end_time"] - datetime.utcnow()).total_seconds() / 60)
-                    user_data["pending_purchase"] = {"type": "bait_replace", "bait": bait}
-                    await update.message.reply_text(
-                        f"⚠️ Вы точно хотите купить {bait['name']} во время действия {current_bait['name']}? "
-                        f"Текущей осталось ещё {remaining_time} минут.",
-                        reply_markup=ReplyKeyboardMarkup(
-                            [[KeyboardButton(BUTTON_CONFIRM_YES), KeyboardButton(BUTTON_CONFIRM_NO)]],
-                            resize_keyboard=True
-                        )
-                    )
-                    logger.info(f"User {user.id} ({nickname}) is attempting to replace bait '{current_bait['name']}' with '{bait['name']}'.")
-                    return CONFIRM_REPLACE_BAIT
-                else:
-                    # Просто заменяем наживку
-                    user_data["gold"] -= bait["price"]
-                    user_data["current_bait"] = {
-                        "name": bait["name"],
-                        "end_time": datetime.utcnow() + bait["duration"],
-                        "probabilities": bait["probabilities"]
-                    }
-                    await update.message.reply_text(
-                        f"✅ Вы купили {bait['name']} за {bait['price']} золота и заменили {current_bait['name']}.",
-                        reply_markup=shop_menu_keyboard()
-                    )
-                    logger.info(f"User {user.id} ({nickname}) bought bait '{bait['name']}' and replaced '{current_bait['name']}'.")
-            else:
-                # Устанавливаем новую наживку
-                user_data["gold"] -= bait["price"]
-                user_data["current_bait"] = {
-                    "name": bait["name"],
-                    "end_time": datetime.utcnow() + bait["duration"],
-                    "probabilities": bait["probabilities"]
-                }
-                await update.message.reply_text(
-                    f"✅ Вы купили {bait['name']} за {bait['price']} золота.",
-                    reply_markup=shop_menu_keyboard()
-                )
-                logger.info(f"User {user.id} ({nickname}) bought bait '{bait['name']}' for {bait['price']} gold.")
-        else:
-            await update.message.reply_text(
-                "❌ Недостаточно золота для покупки этой наживки.",
-                reply_markup=shop_menu_keyboard()
-            )
-            logger.warning(f"User {user.id} ({nickname}) does not have enough gold to buy bait '{bait['name']}'.")
-        user_data["pending_purchase"] = None
-        return ConversationHandler.END
-    elif confirmation == BUTTON_CONFIRM_NO:
-        if user_data.get("pending_purchase", {}).get("type") == "bait_replace":
-            await update.message.reply_text(
-                "❌ Замена наживки отменена.",
-                reply_markup=shop_menu_keyboard()
-            )
-            logger.info(f"User {user.id} ({nickname}) cancelled bait replacement.")
-        else:
-            await update.message.reply_text(
-                "❌ Покупка наживки отменена.",
-                reply_markup=shop_menu_keyboard()
-            )
-            logger.info(f"User {user.id} ({nickname}) cancelled bait purchase.")
-        user_data["pending_purchase"] = None
-        return ConversationHandler.END
-    else:
-        await update.message.reply_text(
-            "❗ Неизвестная команда. Пожалуйста, используйте кнопки ниже.",
-            reply_markup=shop_menu_keyboard()
-        )
-        logger.error(f"User {user.id} ({nickname}) sent an unknown confirmation: '{confirmation}'.")
-        return ConversationHandler.END
-
-# Хендлер для подтверждения замены наживки на более дешевую
-async def confirm_replace_bait(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    confirmation = update.message.text.strip()
-    user = update.effective_user
-    user_data = users_data[user.id]
-    nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
-    bait = user_data.get("pending_purchase", {}).get("bait")
-
-    if confirmation == BUTTON_CONFIRM_YES and bait:
-        if user_data["gold"] >= bait["price"]:
-            previous_bait = user_data["current_bait"]["name"]
-            user_data["gold"] -= bait["price"]
-            user_data["current_bait"] = {
-                "name": bait["name"],
-                "end_time": datetime.utcnow() + bait["duration"],
-                "probabilities": bait["probabilities"]
-            }
-            await update.message.reply_text(
-                f"✅ Вы поменяли наживку {previous_bait} на {bait['name']} за {bait['price']} золота.",
-                reply_markup=shop_menu_keyboard()
-            )
-            logger.info(f"User {user.id} ({nickname}) replaced bait '{previous_bait}' with '{bait['name']}'.")
-        else:
-            await update.message.reply_text(
-                "❌ Недостаточно золота для покупки этой наживки.",
-                reply_markup=shop_menu_keyboard()
-            )
-            logger.warning(f"User {user.id} ({nickname}) does not have enough gold to replace bait with '{bait['name']}'.")
-        user_data["pending_purchase"] = None
-        return ConversationHandler.END
-    elif confirmation == BUTTON_CONFIRM_NO:
-        await update.message.reply_text(
-            "❌ Замена наживки отменена.",
-            reply_markup=shop_menu_keyboard()
-        )
-        logger.info(f"User {user.id} ({nickname}) cancelled bait replacement.")
-        user_data["pending_purchase"] = None
-        return ConversationHandler.END
-    else:
-        await update.message.reply_text(
-            "❗ Неизвестная команда. Пожалуйста, используйте кнопки ниже.",
-            reply_markup=shop_menu_keyboard()
-        )
-        logger.error(f"User {user.id} ({nickname}) sent an unknown confirmation for bait replacement: '{confirmation}'.")
-        return ConversationHandler.END
-
-# Хендлер для раздела "О рыбаке"
-async def about_fisherman(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_data = users_data[user.id]
-    about_text = get_about_fisherman_text(user_data)
-    await update.message.reply_text(
-        about_text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=about_fisherman_keyboard()
-    )
-    logger.info(f"User {user.id} ({user_data['nickname']}) viewed about fisherman.")
-
-# Обработчик текстовых сообщений
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    user = update.effective_user
-    user_data = users_data[user.id]
-    nickname = user_data["nickname"] if user_data["nickname"] else user.first_name
-
-    # Проверка истечения времени действия наживки при каждом взаимодействии
-    current_bait = user_data["current_bait"]
-    if current_bait:
-        if datetime.utcnow() >= current_bait["end_time"]:
-            user_data["current_bait"] = None
-            await update.message.reply_text(
-                "🪱 Ваша наживка истекла.",
-                reply_markup=inventory_menu_keyboard()
-            )
-            logger.info(f"User {user.id} ({nickname})'s bait has expired.")
-
-    logger.info(f"Received message from user {user.id} ({nickname}): {update.message.text}")
-
-    if text == BUTTON_START_FISHING:
-        await begin_fishing(update, context)
-    elif text == BUTTON_LAKE:
-        await lake(update, context)
-    elif text == BUTTON_INVENTORY:
-        await inventory(update, context)
-    elif text == BUTTON_SHOP:
-        await shop(update, context)
-    elif text == BUTTON_IDENTIFY_FISH:
-        await identify_fish(update, context)
-    elif text == BUTTON_SELL_ALL:
-        await sell_fish(update, context)
-    elif text == BUTTON_EXCHANGE_GOLD:
-        await exchange_gold(update, context)
-    elif text == BUTTON_UPDATE:
-        await update_fishing_status(update, context)
-    elif text == BUTTON_CATCH_FISH:
-        await catch_fish(update, context)
-    elif text == BUTTON_PULL:
-        await pull_hook(update, context)
-    elif text == BUTTON_ABOUT_FISHERMAN:
-        await about_fisherman(update, context)
-    elif text == BUTTON_GO_BACK:
-        await go_back(update, context)
-    elif text in [BUTTON_CONFIRM_YES, BUTTON_CONFIRM_NO, BUTTON_CONFIRM_NOT_ENOUGH]:
-        # Определение контекста покупки
-        pending = user_data.get("pending_purchase")
-        if pending:
-            if pending["type"] == "rod":
-                await confirm_buy_rod(update, context)
-            elif pending["type"] == "rod_replace":
-                await confirm_replace_rod(update, context)
-            elif pending["type"] == "bait":
-                await confirm_buy_bait(update, context)
-            elif pending["type"] == "bait_replace":
-                await confirm_replace_bait(update, context)
-            else:
-                await update.message.reply_text(
-                    "❗ Неизвестный контекст. Пожалуйста, попробуйте снова.",
-                    reply_markup=main_menu_keyboard()
-                )
-                logger.error(f"User {user.id} ({nickname}) has unknown pending purchase type.")
+        if text == BUTTON_START_FISHING:
+            await begin_fishing(update, context)
+        elif text == BUTTON_LAKE:
+            await lake(update, context)
+        elif text == BUTTON_INVENTORY:
+            await inventory_handler(update, context)
+        elif text == BUTTON_SHOP:
+            await shop_handler(update, context)
+        elif text == BUTTON_IDENTIFY_FISH:
+            await identify_fish(update, context)
+        elif text == BUTTON_SELL_ALL:
+            await sell_fish_handler(update, context)
+        elif text == BUTTON_EXCHANGE_GOLD:
+            await exchange_gold_handler(update, context)
+        elif text == BUTTON_UPDATE:
+            await update_fishing_status(update, context)
+        elif text == BUTTON_CATCH_FISH:
+            await catch_fish(update, context)
+        elif text == BUTTON_PULL:
+            await pull_hook(update, context)
+        elif text == BUTTON_ABOUT_FISHERMAN:
+            await about_fisherman(update, context)
+        elif text == BUTTON_GO_BACK:
+            await go_back(update, context)
+        elif text == BUTTON_LEADERBOARD or text in [BUTTON_TOTAL_GOLD, BUTTON_TOTAL_KG, BUTTON_TOTAL_EXPERIENCE]:
+            await leaderboard_handler(update, context)
         else:
             await update.message.reply_text(
                 "❗ Неизвестная команда. Пожалуйста, используйте кнопки ниже.",
                 reply_markup=main_menu_keyboard()
             )
-            logger.warning(f"User {user.id} ({nickname}) sent a confirmation without pending purchase.")
-    elif text == BUTTON_LEADERBOARD or text in [BUTTON_TOTAL_GOLD, BUTTON_TOTAL_KG, BUTTON_TOTAL_EXPERIENCE]:
-        await handle_leaderboard_menu(update, context)
-    else:
-        await update.message.reply_text(
-            "❗ Неизвестная команда. Пожалуйста, используйте кнопки ниже.",
-            reply_markup=main_menu_keyboard()
+            logger.warning(f"Unknown command from user {user.id} ({nickname}): {update.message.text}")
+
+    ###############################################################
+    # MAIN FUNCTION
+    ###############################################################
+
+    def main():
+        # Замените "YOUR_TELEGRAM_BOT_TOKEN" на ваш действительный токен
+        application = ApplicationBuilder().token("8132081407:AAGSbjptd2JBrVUNOheyvvfC7nwIfMagD4o").build()
+
+        # Создание ConversationHandler для установки ника и покупки
+        conv_handler = ConversationHandler(
+            entry_points=[
+                MessageHandler(filters.Regex(re.escape(BUTTON_START_FISHING)), begin_fishing),
+                MessageHandler(filters.Regex(re.escape(BUTTON_RODS)), rods_section),
+                MessageHandler(filters.Regex(re.escape(BUTTON_BAITS)), baits_section)
+            ],
+            states={
+                ASK_NICKNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_nickname)],
+                BUY_ROD: [
+                    MessageHandler(filters.Regex(f"^{re.escape(BUTTON_CONFIRM_YES)}$"), confirm_buy_rod),
+                    MessageHandler(filters.Regex(f"^{re.escape(BUTTON_CONFIRM_NO)}$"), cancel_buy_rod),
+                    MessageHandler(filters.Regex(f"^{re.escape(BUTTON_GO_BACK)}$"), go_back)
+                ],
+                CONFIRM_BUY_ROD: [
+                    MessageHandler(filters.Regex(f"^{re.escape(BUTTON_CONFIRM_YES)}$"), confirm_buy_rod),
+                    MessageHandler(filters.Regex(f"^{re.escape(BUTTON_CONFIRM_NO)}$"), cancel_buy_rod)
+                ],
+                CONFIRM_REPLACE_ROD: [
+                    MessageHandler(filters.Regex(f"^{re.escape(BUTTON_CONFIRM_YES)}$"), confirm_replace_rod),
+                    MessageHandler(filters.Regex(f"^{re.escape(BUTTON_CONFIRM_NO)}$"), cancel_replace_rod)
+                ],
+                BUY_BAIT: [
+                    MessageHandler(filters.Regex(f"^{re.escape(BUTTON_CONFIRM_YES)}$"), confirm_buy_bait),
+                    MessageHandler(filters.Regex(f"^{re.escape(BUTTON_CONFIRM_NO)}$"), cancel_buy_bait),
+                    MessageHandler(filters.Regex(f"^{re.escape(BUTTON_GO_BACK)}$"), go_back)
+                ],
+                CONFIRM_BUY_BAIT: [
+                    MessageHandler(filters.Regex(f"^{re.escape(BUTTON_CONFIRM_YES)}$"), confirm_buy_bait),
+                    MessageHandler(filters.Regex(f"^{re.escape(BUTTON_CONFIRM_NO)}$"), cancel_buy_bait)
+                ],
+                CONFIRM_REPLACE_BAIT: [
+                    MessageHandler(filters.Regex(f"^{re.escape(BUTTON_CONFIRM_YES)}$"), confirm_replace_bait),
+                    MessageHandler(filters.Regex(f"^{re.escape(BUTTON_CONFIRM_NO)}$"), cancel_replace_bait)
+                ],
+            },
+            fallbacks=[
+                CommandHandler("cancel", cancel_nickname),
+                MessageHandler(filters.Regex(re.escape(BUTTON_GO_BACK)), go_back)
+            ],
+            allow_reentry=True
         )
-        logger.warning(f"Unknown command from user {user.id} ({nickname}): {update.message.text}")
 
-# Основная функция
-def main():
-    # Используйте ваш рабочий токен ниже
-    application = ApplicationBuilder().token("8132081407:AAGSbjptd2JBrVUNOheyvvfC7nwIfMagD4o").build()
+        # Добавление обработчиков команд
+        application.add_handler(CommandHandler("start", start))
 
-    # Создание ConversationHandler для установки ника и покупки
-    conv_handler = ConversationHandler(
-        entry_points=[
-            MessageHandler(filters.Regex(re.escape(BUTTON_START_FISHING)), begin_fishing),
-            MessageHandler(filters.Regex(re.escape(BUTTON_RODS)), rods_section),
-            MessageHandler(filters.Regex(re.escape(BUTTON_BAITS)), baits_section)
-        ],
-        states={
-            ASK_NICKNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_nickname)],
-            BUY_ROD: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_rod)],
-            CONFIRM_BUY_ROD: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_buy_rod)],
-            CONFIRM_REPLACE_ROD: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_replace_rod)],
-            BUY_BAIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_bait)],
-            CONFIRM_BUY_BAIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_buy_bait)],
-            CONFIRM_REPLACE_BAIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_replace_bait)],
-        },
-        fallbacks=[
-            CommandHandler("cancel", cancel_nickname),
-            MessageHandler(filters.Regex(re.escape(BUTTON_GO_BACK)), go_back)
-        ],
-        allow_reentry=True
-    )
+        # Добавление обработчиков ConversationHandler
+        application.add_handler(conv_handler)
 
-    # Добавление обработчиков команд
-    application.add_handler(CommandHandler("start", start))
+        # Добавление обработчиков сообщений
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Добавление обработчиков ConversationHandler
-    application.add_handler(conv_handler)
+        # Запуск бота
+        application.run_polling()
 
-    # Добавление обработчиков сообщений
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # Запуск бота
-    application.run_polling()
-
-if __name__ == '__main__':
-    main()
+    if __name__ == '__main__':
+        main()
