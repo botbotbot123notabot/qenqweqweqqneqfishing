@@ -1,1 +1,1 @@
-worker: python3 fishingbot.py
+web: python3 fishingbot.py
