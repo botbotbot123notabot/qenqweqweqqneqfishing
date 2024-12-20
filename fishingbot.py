@@ -11,7 +11,6 @@ from telegram import (
     KeyboardButton,
     ReplyKeyboardRemove,
 )
-from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -21,14 +20,14 @@ from telegram.ext import (
     ConversationHandler,
 )
 
-# ЛОГИРОВАНИЕ
+from guilds import guild_conversation_handler, add_guild_exp, guilds_data, get_guild_membership_rank, GUILD_BONUSES, GUILD_LEVELS
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Кнопки
 BUTTON_START_FISHING = "🎣 Начать рыбалку"
 BUTTON_LAKE = "🏞 Озеро"
 BUTTON_INVENTORY = "📦 Инвентарь"
@@ -37,19 +36,28 @@ BUTTON_CATCH_FISH = "🎣 Ловить рыбку"
 BUTTON_UPDATE = "🔄 Обновить"
 BUTTON_GO_BACK = "🔙 Вернуться"
 BUTTON_IDENTIFY_FISH = "🔍 Опознать рыбу"
-BUTTON_SELL_ALL = "💰 Продать все за золото"
-BUTTON_EXCHANGE_GOLD = "🔄 Обменять золото"
+BUTTON_SELL_ALL = "🐟 Продать всю рыбу"
+BUTTON_EXCHANGE_GOLD = "Обмен золото на TON"
 BUTTON_PULL = "🐟 Тянуть"
 BUTTON_CONFIRM_YES = "✅ Да"
 BUTTON_CONFIRM_NO = "❌ Нет"
-BUTTON_CONFIRM_NOT_ENOUGH = "❌ Нехватает золота! Нужно 25000+"
 BUTTON_LEADERBOARD = "🏆 Таблица Лидеров"
-BUTTON_TOTAL_GOLD = "💰 Всего заработано золота"
-BUTTON_TOTAL_KG = "🐟 Всего поймано КГ рыбы"
-BUTTON_TOTAL_EXPERIENCE = "⭐ Самые опытные"
+BUTTON_TOTAL_GOLD = "Лидеры по золоту"
+BUTTON_TOTAL_KG = "Лидеры по улову"
+BUTTON_TOTAL_EXPERIENCE = "Лидеры по опыту"
 BUTTON_RODS = "🎣 Удочки"
 BUTTON_BAITS = "🪱 Наживки"
 BUTTON_ABOUT_FISHERMAN = "👤 О рыбаке"
+BUTTON_GUILDS = "🛡️ Гильдии"
+BUTTON_HELP = "🔍 Помощь"
+
+# Кнопки помощи
+BUTTON_HELP_FISHING = "Рыбалка"
+BUTTON_HELP_RODS = "Удочки"
+BUTTON_HELP_BAITS = "Наживка"
+BUTTON_HELP_SHOP = "Магазин"
+BUTTON_HELP_GUILDS = "Гильдии"
+BUTTON_HELP_ABOUT = "О рыбаке"
 
 ASK_NICKNAME = 1
 BUY_ROD = 2
@@ -59,9 +67,12 @@ CONFIRM_BUY_BAIT = 5
 EXCHANGE = 6
 LEADERBOARD_CATEGORY = 7
 
+HELP_MENU = 900
+HELP_SUBTOPIC = 901
+
 users_data = defaultdict(lambda: {
     "nickname": None,
-    "inventory": defaultdict(int),  # {(fish_name, weight, rarity): qty}
+    "inventory": defaultdict(int),
     "gold": 0,
     "unidentified": {"common": 0, "rare": 0, "legendary": 0},
     "fishing": None,
@@ -78,7 +89,10 @@ users_data = defaultdict(lambda: {
     "rank": "Юный рыбак",
     "registration_time": datetime.utcnow(),
     "fish_caught_per_rod": defaultdict(int),
-    "fish_caught_per_bait": defaultdict(int)
+    "fish_caught_per_bait": defaultdict(int),
+    "guild_id": None,
+    "guild_join_time": None,
+    "id": None
 })
 
 LEVELS = [
@@ -179,50 +193,41 @@ BAITS = [
     },
 ]
 
-def main_menu_keyboard():
-    keyboard = [
-        [KeyboardButton(BUTTON_LAKE)],
-        [KeyboardButton(BUTTON_INVENTORY), KeyboardButton(BUTTON_ABOUT_FISHERMAN)],
-        [KeyboardButton(BUTTON_SHOP), KeyboardButton(BUTTON_LEADERBOARD)],
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+def update_rank(user_data):
+    level=user_data["level"]
+    for lvl_data in LEVELS:
+        if lvl_data["level"]==level:
+            user_data["rank"]=lvl_data["rank"]
+            return
 
-def lake_menu_keyboard():
-    keyboard = [
-        [KeyboardButton(BUTTON_CATCH_FISH)],
-        [KeyboardButton(BUTTON_UPDATE)],
-        [KeyboardButton(BUTTON_GO_BACK)],
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+def get_required_xp(level):
+    for lvl_data in LEVELS:
+        if lvl_data["level"]==level:
+            return lvl_data["required_xp"]
+    if level>LEVELS[-1]["level"]:
+        last_required=LEVELS[-1]["required_xp"]
+        additional_levels=level-LEVELS[-1]["level"]
+        return int(last_required*(1.5**additional_levels))
+    return 10
 
-def inventory_menu_keyboard():
-    keyboard = [
-        [KeyboardButton(BUTTON_IDENTIFY_FISH)],
-        [KeyboardButton(BUTTON_GO_BACK)],
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+def check_level_up(user_data):
+    level_up=False
+    gold_reward=0
+    new_level=None
+    while user_data["level"]<=len(LEVELS) and user_data["experience"]>=get_required_xp(user_data["level"]):
+        user_data["level"]+=1
+        update_rank(user_data)
+        gold_reward+=user_data["level"]*2
+        user_data["gold"]+=user_data["level"]*2
+        level_up=True
+        new_level=user_data["level"]
+    return level_up,new_level,gold_reward
 
-def shop_menu_keyboard():
-    keyboard = [
-        [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
-        [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
-        [KeyboardButton(BUTTON_GO_BACK)],
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-def leaderboard_menu_keyboard():
-    keyboard = [
-        [KeyboardButton(BUTTON_TOTAL_GOLD), KeyboardButton(BUTTON_TOTAL_KG)],
-        [KeyboardButton(BUTTON_TOTAL_EXPERIENCE)],
-        [KeyboardButton(BUTTON_GO_BACK)],
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-def about_fisherman_keyboard():
-    keyboard = [
-        [KeyboardButton(BUTTON_GO_BACK)],
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+def generate_identified_fish(rarity):
+    prefix=random.choice(FISH_DATA[rarity]["prefixes"])
+    fname=random.choice(FISH_DATA[rarity]["names"])
+    w=random.randint(*FISH_DATA[rarity]["weight_range"])
+    return (f"{prefix} {fname}", w, rarity)
 
 def get_welcome_text():
     return (
@@ -244,49 +249,30 @@ def get_lake_text(user_nickname):
         "Что вы хотите сделать?"
     )
 
-def get_required_xp(level):
-    for lvl in LEVELS:
-        if lvl["level"] == level:
-            return lvl["required_xp"]
-    if level > LEVELS[-1]["level"]:
-        last_required = LEVELS[-1]["required_xp"]
-        additional_levels = level - LEVELS[-1]["level"]
-        return int(last_required * (1.5 ** additional_levels))
-    return 10
+def main_menu_keyboard():
+    keyboard = [
+        [KeyboardButton(BUTTON_LAKE)],
+        [KeyboardButton(BUTTON_INVENTORY), KeyboardButton(BUTTON_ABOUT_FISHERMAN)],
+        [KeyboardButton(BUTTON_SHOP), KeyboardButton(BUTTON_LEADERBOARD), KeyboardButton(BUTTON_GUILDS)],
+        [KeyboardButton(BUTTON_HELP)]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-def get_about_fisherman_text(user_data):
-    nickname = user_data["nickname"]
-    level = user_data["level"]
-    rank = user_data["rank"]
-    experience = user_data["experience"]
-    required_xp = get_required_xp(level)
-    age_delta = datetime.utcnow() - user_data["registration_time"]
-    hours, remainder = divmod(int(age_delta.total_seconds()), 3600)
-    minutes, _ = divmod(remainder, 60)
-    age = f"{hours} часов и {minutes} минут"
-
-    if user_data["fish_caught_per_rod"]:
-        favorite_rod = max(user_data["fish_caught_per_rod"], key=user_data["fish_caught_per_rod"].get)
-    else:
-        favorite_rod = "нет"
-
-    if user_data["fish_caught_per_bait"]:
-        favorite_bait = max(user_data["fish_caught_per_bait"], key=user_data["fish_caught_per_bait"].get)
-    else:
-        favorite_bait = "нет"
-
-    text = (
-        f"👤 О рыбаке:\n\n"
-        f"Имя: {nickname}\n"
-        f"Уровень: {level}\n"
-        f"Ранг: {rank}\n"
-        f"Опыт: {experience}/{required_xp}\n"
-        f"Возраст вашего приключения: {age}\n"
-        f"Любимая удочка: {favorite_rod}\n"
-        f"Любимая наживка: {favorite_bait}\n\n"
-        "Продолжайте ловить, опознавать и продавать рыбу, чтобы расти в мастерстве!"
-    )
-    return text
+def get_shop_text(user_data):
+    inventory = user_data["inventory"]
+    identified = [(k,v) for k,v in inventory.items() if v>0 and isinstance(k,tuple)]
+    if not identified:
+        return ("Кажется у вас закончилась рыба. Скорее идите поймайте и опознайте еще! И приходите для продажи! 🐟",0)
+    text="🏪 Добро пожаловать в магазин!\n\nВаша опознанная рыба:\n"
+    total_weight=0
+    for (fname,w,r),qty in identified:
+        tw=w*qty
+        text+=f"{fname} - {qty} шт. (Вес одного: {w} КГ, всего: {tw} КГ)\n"
+        total_weight+=tw
+    gold=int(total_weight*pi/4)
+    text+=f"\nОбщий вес: {total_weight} КГ\n"
+    text+=f"\nПродать всю рыбу за {gold} золота?"
+    return (text,gold)
 
 def generate_fish_catch_message(fish_type, xp_gained, level_up=False, new_level=None, gold_reward=0):
     message = (
@@ -317,7 +303,6 @@ def get_inventory_text(user_data):
         text+="🪱 Наживка: нет\n"
 
     text+="\n"
-    # Неопознанная рыба
     common_count=unidentified['common']
     rare_count=unidentified['rare']
     legend_count=unidentified['legendary']
@@ -330,93 +315,74 @@ def get_inventory_text(user_data):
     if common_count==0 and rare_count==0 and legend_count==0:
         text+="Нет неопознанной рыбы.\n"
 
-    # Опознанная рыба
     identified_fish = [(k,v) for k,v in inventory.items() if v>0 and isinstance(k,tuple)]
     if identified_fish:
         text+="\nОпознанная рыба:\n"
         for (fname, w, r), qty in identified_fish:
             total_w = w*qty
-            text+=f"• {fname} (редкость: {r}) - вес: {w} КГ - {qty} шт. (итого {total_w} КГ)\n"
+            text+=f"• {fname} - вес: {w} КГ - {qty} шт. (итого {total_w} КГ)\n"
 
     text += f"\n💰 Золото: {gold}"
     return text
 
-def get_shop_text(user_data):
-    inventory = user_data["inventory"]
-    identified = [(k,v) for k,v in inventory.items() if v>0 and isinstance(k,tuple)]
-    if not identified:
-        return ("🏪 В магазине пусто для продажи. Сначала поймайте и опознайте рыбу!",0)
-    text="🏪 Добро пожаловать в магазин!\n\nВаша опознанная рыба:\n"
-    total_weight=0
-    for (fname,w,r),qty in identified:
-        tw=w*qty
-        text+=f"{fname} (р. {r}) - {qty} шт. (Вес одного: {w} КГ, всего: {tw} КГ)\n"
-        total_weight+=tw
-    gold=int(total_weight*pi/4)
-    text+=f"\nПродать всю рыбу за {gold} золота?"
-    return (text,gold)
+def help_menu_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton(BUTTON_HELP_FISHING), KeyboardButton(BUTTON_HELP_RODS)],
+        [KeyboardButton(BUTTON_HELP_BAITS), KeyboardButton(BUTTON_HELP_SHOP)],
+        [KeyboardButton(BUTTON_HELP_GUILDS), KeyboardButton(BUTTON_HELP_ABOUT)],
+        [KeyboardButton(BUTTON_GO_BACK)]
+    ], resize_keyboard=True)
 
-def check_level_up(user_data):
-    level_up=False
-    gold_reward=0
-    new_level=None
-    while user_data["level"]<=len(LEVELS) and user_data["experience"]>=get_required_xp(user_data["level"]):
-        user_data["level"]+=1
-        update_rank(user_data)
-        gold_reward+=user_data["level"]*2
-        user_data["gold"]+=user_data["level"]*2
-        level_up=True
-        new_level=user_data["level"]
-    return level_up,new_level,gold_reward
+def help_text(topic):
+    if topic == BUTTON_HELP_FISHING:
+        return ("Рыбалка - ваш путь к улову. Нажмите 'Ловить рыбку', подождите, пока клюнет, и тяните рыбу! "
+                "Неопознанную рыбу нужно потом опознать в инвентаре, чтобы продать.")
+    elif topic == BUTTON_HELP_RODS:
+        return ("Удочки влияют на скорость ловли. Чем лучше удочка, тем меньше ждать! "
+                "Покупайте удочки в магазине за золото и ускоряйте процесс рыбалки.")
+    elif topic == BUTTON_HELP_BAITS:
+        return ("Наживка повышает шансы выловить более ценную рыбу. "
+                "Купите наживку и активируйте её, чтобы увеличить шансы на редкую и легендарную рыбу.")
+    elif topic == BUTTON_HELP_SHOP:
+        return ("Магазин - место, где вы можете продавать опознанную рыбу за золото, "
+                "покупать удочки и наживки, а также обменивать золото на TON. "
+                "Заработав достаточно рыбы и золота, вы сможете приобрести лучшие предметы!")
+    elif topic == BUTTON_HELP_GUILDS:
+        return ("Гильдии - объединения рыбаков. Создайте или вступите в гильдию, "
+                "зарабатывайте опыт для гильдии и получайте бонусы. "
+                "В гильдейском магазине можно купить особые удочки и наживки.")
+    elif topic == BUTTON_HELP_ABOUT:
+        return ("Раздел 'О рыбаке' показывает вашу статистику: уровень, опыт, любимую удочку и наживку, "
+                "а также гильдию, если вы состоите в одной. Здесь вы можете увидеть, насколько далеко вы продвинулись в карьере рыбака!")
+    return "Нет информации."
 
-def update_rank(user_data):
-    level=user_data["level"]
-    rank="Юный рыбак"
-    if 1 <= level <= 3:
-        rank = "Юный рыбак"
-    elif 4 <= level <= 6:
-        rank = "Начинающий ловец"
-    elif 7 <= level <= 9:
-        rank = "Ловец мелкой рыбёшки"
-    elif 10 <= level <= 12:
-        rank = "Опытный удильщик"
-    elif 13 <= level <= 15:
-        rank = "Любитель клёва"
-    elif 16 <= level <= 20:
-        rank = "Знаток крючков"
-    elif 21 <= level <= 25:
-        rank = "Мастер наживки"
-    elif 26 <= level <= 30:
-        rank = "Искусный рыбак"
-    elif 31 <= level <= 35:
-        rank = "Охотник за уловом"
-    elif 36 <= level <= 40:
-        rank = "Настоящий рыболов"
-    elif 41 <= level <= 45:
-        rank = "Виртуоз рыбалки"
-    elif 46 <= level <= 50:
-        rank = "Укротитель рек"
-    elif 51 <= level <= 55:
-        rank = "Морской добытчик"
-    elif 56 <= level <= 60:
-        rank = "Легенда пруда"
-    elif 61 <= level <= 65:
-        rank = "Властелин озёр"
-    elif 66 <= level <= 70:
-        rank = "Мастер рыбалки"
-    elif 71 <= level <= 75:
-        rank = "Эпический рыболов"
-    user_data["rank"]=rank
+async def set_nickname(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user=update.effective_user
+    nickname=update.message.text.strip()
+    if len(nickname)>25:
+        await update.message.reply_text("❌ Имя слишком длинное.")
+        return ASK_NICKNAME
+    if not re.match(r'^[A-Za-zА-Яа-яЁё\s]+$', nickname):
+        await update.message.reply_text("❌ Только буквы и пробелы!")
+        return ASK_NICKNAME
+    existing=[d["nickname"] for uid,d in users_data.items() if d["nickname"]]
+    if nickname in existing:
+        await update.message.reply_text("❌ Это имя уже занято.")
+        return ASK_NICKNAME
+    ud=users_data[user.id]
+    ud["nickname"]=nickname
+    await update.message.reply_text(f"✅ Теперь вы - {nickname}!\nДобро пожаловать!",
+                                    reply_markup=main_menu_keyboard())
+    return ConversationHandler.END
 
-def generate_identified_fish(rarity):
-    prefix=random.choice(FISH_DATA[rarity]["prefixes"])
-    fname=random.choice(FISH_DATA[rarity]["names"])
-    w=random.randint(*FISH_DATA[rarity]["weight_range"])
-    return (f"{prefix} {fname}", w, rarity)
+async def cancel_nickname(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Отмена.",reply_markup=main_menu_keyboard())
+    return ConversationHandler.END
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user=update.effective_user
     ud=users_data[user.id]
+    ud["id"]=user.id
     if ud["registration_time"] == datetime.utcnow():
         ud["gold"]=0
         ud["total_gold_earned"]=0
@@ -432,6 +398,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [[KeyboardButton(BUTTON_START_FISHING)]], resize_keyboard=True
     ))
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.warning(f"Unknown command from user {update.effective_user.id}: {update.message.text}")
+
 async def begin_fishing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user=update.effective_user
     ud=users_data[user.id]
@@ -443,34 +412,16 @@ async def begin_fishing(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         reply_markup=main_menu_keyboard())
         return ConversationHandler.END
 
-async def set_nickname(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user=update.effective_user
-    nickname=update.message.text.strip()
-    if len(nickname)>25:
-        await update.message.reply_text("❌ Имя слишком длинное.")
-        return ASK_NICKNAME
-    if not re.match(r'^[A-Za-zА-Яа-яЁё\s]+$', nickname):
-        await update.message.reply_text("❌ Только буквы и пробелы!")
-        return ASK_NICKNAME
-    existing=[d["nickname"] for uid,d in users_data.items() if d["nickname"]]
-    if nickname in existing:
-        await update.message.reply_text("❌ Это имя уже занято.")
-        return ASK_NICKNAME
-    users_data[user.id]["nickname"]=nickname
-    await update.message.reply_text(f"✅ Теперь вы - {nickname}!\nДобро пожаловать!",
-                                    reply_markup=main_menu_keyboard())
-    return ConversationHandler.END
-
-async def cancel_nickname(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отмена.",reply_markup=main_menu_keyboard())
-    return ConversationHandler.END
-
 async def lake_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user=update.effective_user
     ud=users_data[user.id]
     name=ud["nickname"] if ud["nickname"] else user.first_name
     txt=get_lake_text(name)
-    await update.message.reply_text(txt,reply_markup=lake_menu_keyboard())
+    await update.message.reply_text(txt,reply_markup=ReplyKeyboardMarkup([
+        [KeyboardButton(BUTTON_CATCH_FISH)],
+        [KeyboardButton(BUTTON_UPDATE)],
+        [KeyboardButton(BUTTON_GO_BACK)],
+    ], resize_keyboard=True))
 
 async def catch_fish_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user=update.effective_user
@@ -485,14 +436,18 @@ async def catch_fish_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ud["fishing"]={"end_time":datetime.utcnow()+timedelta(seconds=delay),"status":"fishing"}
     await update.message.reply_text(
         f"🎣 Забросили удочку... Подождите {delay} секунд.",
-        reply_markup=lake_menu_keyboard()
+        reply_markup=ReplyKeyboardMarkup([
+            [KeyboardButton(BUTTON_CATCH_FISH)],
+            [KeyboardButton(BUTTON_UPDATE)],
+            [KeyboardButton(BUTTON_GO_BACK)],
+        ], resize_keyboard=True)
     )
 
 async def update_fishing_status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user=update.effective_user
     ud=users_data[user.id]
     if not ud["fishing"]:
-        await update.message.reply_text("Вы сейчас не ловите рыбу.",reply_markup=lake_menu_keyboard())
+        await update.message.reply_text("Вы сейчас не ловите рыбу.",reply_markup=main_menu_keyboard())
         return
     end=ud["fishing"]["end_time"]
     now=datetime.utcnow()
@@ -512,27 +467,39 @@ async def pull_hook_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ud=users_data[user.id]
     if not ud["fishing"]:
         await update.message.reply_text("Сначала начните ловить.",
-                                        reply_markup=lake_menu_keyboard())
+                                        reply_markup=main_menu_keyboard())
         return
     end=ud["fishing"]["end_time"]
     now=datetime.utcnow()
     if now>=end and ud["fishing"]["status"]=="ready_to_pull":
         r=random.randint(1,100)
-        if r<=70:
+        if ud["current_bait"] and (datetime.utcnow()<ud["current_bait"]["end_time"]):
+            probs=ud["current_bait"]["probabilities"]
+        else:
+            probs={"common":70,"rare":25,"legendary":5}
+
+        cumulative=0
+        rarity_chosen=None
+        for rarity in ["common","rare","legendary"]:
+            cumulative+=probs[rarity]
+            if r<=cumulative:
+                rarity_chosen=rarity
+                break
+
+        if rarity_chosen=="common":
             ftype="Неопознанная рыба"
-            rarity="common"
             xp=random.randint(1,3)
-        elif r<=95:
+        elif rarity_chosen=="rare":
             ftype="Неопознанная редкая рыба"
-            rarity="rare"
             xp=random.randint(4,9)
         else:
             ftype="Неопознанная легендарная рыба"
-            rarity="legendary"
             xp=random.randint(10,30)
-        ud["unidentified"][rarity]+=1
+
+        ud["unidentified"][rarity_chosen]+=1
         ud["fishing"]=None
         ud["experience"]+=xp
+        add_guild_exp(user.id, xp, users_data)
         rod=ud["current_rod"]["name"]
         bait=ud["current_bait"]["name"] if ud["current_bait"] else "Нет наживки"
         ud["fish_caught_per_rod"][rod]+=1
@@ -559,34 +526,44 @@ async def identify_fish_handler(update: Update, context: ContextTypes.DEFAULT_TY
     un=ud["unidentified"]
     if all(x==0 for x in un.values()):
         await update.message.reply_text("Нет неопознанной рыбы.",
-                                        reply_markup=inventory_menu_keyboard())
+                                        reply_markup=ReplyKeyboardMarkup([
+                                            [KeyboardButton(BUTTON_GO_BACK)],
+                                        ], resize_keyboard=True))
         return
     results=[]
-    # Опознаём всю рыбу
     for rarity,count in un.items():
         for _ in range(count):
             fname,w,r=generate_identified_fish(rarity)
             ud["inventory"][(fname,w,r)]+=1
             ud["total_kg_caught"]+=w
-            results.append(f"{fname} ({r}) - {w} КГ")
+            results.append(f"{fname} - вес {w} КГ")
 
     ud["unidentified"]={"common":0,"rare":0,"legendary":0}
     msg="🔍 Вы с любопытством рассматриваете свой улов...\n" \
         "Теперь вы знаете, кто скрывался в глубинах:\n"+"\n".join(results)
-    await update.message.reply_text(msg,reply_markup=inventory_menu_keyboard())
+    await update.message.reply_text(msg,reply_markup=ReplyKeyboardMarkup([
+        [KeyboardButton(BUTTON_GO_BACK)]
+    ],resize_keyboard=True))
 
 async def inventory_handler_func(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user=update.effective_user
     ud=users_data[user.id]
     txt=get_inventory_text(ud)
-    await update.message.reply_text(txt,reply_markup=inventory_menu_keyboard())
+    await update.message.reply_text(txt,reply_markup=ReplyKeyboardMarkup([
+        [KeyboardButton(BUTTON_IDENTIFY_FISH)],
+        [KeyboardButton(BUTTON_GO_BACK)],
+    ], resize_keyboard=True))
 
 async def shop_handler_func(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user=update.effective_user
     ud=users_data[user.id]
     info,g= get_shop_text(ud)
     ud["shop_gold"]=g
-    await update.message.reply_text(info,reply_markup=shop_menu_keyboard())
+    await update.message.reply_text(info,reply_markup=ReplyKeyboardMarkup([
+        [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+        [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+        [KeyboardButton(BUTTON_GO_BACK)],
+    ], resize_keyboard=True))
 
 async def sell_fish_handler_func(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user=update.effective_user
@@ -594,7 +571,12 @@ async def sell_fish_handler_func(update: Update, context: ContextTypes.DEFAULT_T
     inv=ud["inventory"]
     identified = [(k,v) for k,v in inv.items() if v>0 and isinstance(k,tuple)]
     if not identified:
-        await update.message.reply_text("Нет опознанной рыбы для продажи.",reply_markup=shop_menu_keyboard())
+        await update.message.reply_text("Нет опознанной рыбы для продажи.",
+                                        reply_markup=ReplyKeyboardMarkup([
+                                            [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+                                            [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+                                            [KeyboardButton(BUTTON_GO_BACK)],
+                                        ], resize_keyboard=True))
         return
     total_w=0
     for (fname,w,r),qty in identified:
@@ -605,7 +587,11 @@ async def sell_fish_handler_func(update: Update, context: ContextTypes.DEFAULT_T
     ud["total_gold_earned"]+=gold_earned
     await update.message.reply_text(
         f"Вы продали всю опознанную рыбу за {gold_earned} золота!",
-        reply_markup=shop_menu_keyboard()
+        reply_markup=ReplyKeyboardMarkup([
+            [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+            [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+            [KeyboardButton(BUTTON_GO_BACK)],
+        ], resize_keyboard=True)
     )
 
 async def exchange_gold_handler_func(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -620,7 +606,11 @@ async def exchange_gold_handler_func(update: Update, context: ContextTypes.DEFAU
         need=25000-ud["gold"]
         await update.message.reply_text(
             f"Не хватает {need} золота для обмена.",
-            reply_markup=shop_menu_keyboard()
+            reply_markup=ReplyKeyboardMarkup([
+                [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+                [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+                [KeyboardButton(BUTTON_GO_BACK)],
+            ], resize_keyboard=True)
         )
 
 async def confirm_exchange_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -630,32 +620,48 @@ async def confirm_exchange_handler(update: Update, context: ContextTypes.DEFAULT
         if ud["gold"]>=25000:
             ud["gold"]-=25000
             await update.message.reply_text("Обмен совершен! Вы получили TON.",
-                                            reply_markup=shop_menu_keyboard())
+                                            reply_markup=ReplyKeyboardMarkup([
+                                                [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+                                                [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+                                                [KeyboardButton(BUTTON_GO_BACK)],
+                                            ], resize_keyboard=True))
         else:
             need=25000-ud["gold"]
             await update.message.reply_text(
                 f"Не хватает {need} золота!",
-                reply_markup=shop_menu_keyboard()
-            )
+                reply_markup=ReplyKeyboardMarkup([
+                    [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+                    [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+                    [KeyboardButton(BUTTON_GO_BACK)],
+                ], resize_keyboard=True))
     else:
         await update.message.reply_text("Обмен отменен.",
-                                        reply_markup=shop_menu_keyboard())
+                                        reply_markup=ReplyKeyboardMarkup([
+                                            [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+                                            [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+                                            [KeyboardButton(BUTTON_GO_BACK)],
+                                        ], resize_keyboard=True))
     return ConversationHandler.END
 
 async def about_fisherman_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user=update.effective_user
     ud=users_data[user.id]
     txt=get_about_fisherman_text(ud)
-    await update.message.reply_text(txt,reply_markup=about_fisherman_keyboard())
+    await update.message.reply_text(txt,reply_markup=ReplyKeyboardMarkup([
+        [KeyboardButton(BUTTON_GO_BACK)],
+    ], resize_keyboard=True))
 
 async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Возвращаемся...",
-                                    reply_markup=main_menu_keyboard())
+    await update.message.reply_text("Возвращаемся...",reply_markup=main_menu_keyboard())
     return ConversationHandler.END
 
 async def leaderboard_handler_func(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Выберите категорию рейтинга:",
-                                    reply_markup=leaderboard_menu_keyboard())
+                                    reply_markup=ReplyKeyboardMarkup([
+                                        [KeyboardButton(BUTTON_TOTAL_GOLD), KeyboardButton(BUTTON_TOTAL_KG)],
+                                        [KeyboardButton(BUTTON_TOTAL_EXPERIENCE)],
+                                        [KeyboardButton(BUTTON_GO_BACK)],
+                                    ], resize_keyboard=True))
     return LEADERBOARD_CATEGORY
 
 async def leaderboard_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -667,7 +673,7 @@ async def leaderboard_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val=lambda d:d["total_gold_earned"]
     elif text==BUTTON_TOTAL_KG:
         all_users.sort(key=lambda x:x[1]["total_kg_caught"],reverse=True)
-        cat="кг рыбы"
+        cat="улову"
         val=lambda d:d["total_kg_caught"]
     elif text==BUTTON_TOTAL_EXPERIENCE:
         all_users.sort(key=lambda x:x[1]["experience"],reverse=True)
@@ -676,6 +682,7 @@ async def leaderboard_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await go_back(update, context)
         return ConversationHandler.END
+
     msg=f"🏆 Топ по {cat}:\n"
     top=all_users[:10]
     i=1
@@ -683,7 +690,11 @@ async def leaderboard_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name=data["nickname"] if data["nickname"] else "Неизвестный рыбак"
         msg+=f"{i}. {name} - {val(data)}\n"
         i+=1
-    await update.message.reply_text(msg,reply_markup=leaderboard_menu_keyboard())
+    await update.message.reply_text(msg,reply_markup=ReplyKeyboardMarkup([
+        [KeyboardButton(BUTTON_TOTAL_GOLD), KeyboardButton(BUTTON_TOTAL_KG)],
+        [KeyboardButton(BUTTON_TOTAL_EXPERIENCE)],
+        [KeyboardButton(BUTTON_GO_BACK)],
+    ], resize_keyboard=True))
     return LEADERBOARD_CATEGORY
 
 async def rods_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -701,7 +712,11 @@ async def buy_rod_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rod_name=update.message.text.strip()
     if rod_name==BUTTON_GO_BACK:
         await update.message.reply_text("Возвращаемся в магазин.",
-                                        reply_markup=shop_menu_keyboard())
+                                        reply_markup=ReplyKeyboardMarkup([
+                                            [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+                                            [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+                                            [KeyboardButton(BUTTON_GO_BACK)],
+                                        ], resize_keyboard=True))
         return ConversationHandler.END
     rod=next((r for r in RODS if r["name"]==rod_name),None)
     if rod:
@@ -713,7 +728,12 @@ async def buy_rod_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return CONFIRM_BUY_ROD
     else:
-        await update.message.reply_text("Неизвестная удочка.",reply_markup=shop_menu_keyboard())
+        await update.message.reply_text("Неизвестная удочка.",
+                                        reply_markup=ReplyKeyboardMarkup([
+                                            [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+                                            [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+                                            [KeyboardButton(BUTTON_GO_BACK)],
+                                        ], resize_keyboard=True))
         return ConversationHandler.END
 
 async def confirm_buy_rod_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -721,7 +741,12 @@ async def confirm_buy_rod_handler(update: Update, context: ContextTypes.DEFAULT_
     ud=users_data[user.id]
     rod=context.user_data.get("pending_rod")
     if not rod:
-        await update.message.reply_text("Ошибка: нет выбранной удочки.",reply_markup=shop_menu_keyboard())
+        await update.message.reply_text("Ошибка: нет выбранной удочки.",
+                                        reply_markup=ReplyKeyboardMarkup([
+                                            [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+                                            [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+                                            [KeyboardButton(BUTTON_GO_BACK)],
+                                        ], resize_keyboard=True))
         return ConversationHandler.END
     if update.message.text==BUTTON_CONFIRM_YES:
         if ud["gold"]>=rod["price"]:
@@ -729,15 +754,27 @@ async def confirm_buy_rod_handler(update: Update, context: ContextTypes.DEFAULT_
             ud["current_rod"]=rod
             await update.message.reply_text(
                 f"Поздравляем! Теперь у вас {rod['name']}!",
-                reply_markup=shop_menu_keyboard())
+                reply_markup=ReplyKeyboardMarkup([
+                    [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+                    [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+                    [KeyboardButton(BUTTON_GO_BACK)],
+                ], resize_keyboard=True))
         else:
             need=rod["price"]-ud["gold"]
             await update.message.reply_text(
                 f"Недостаточно золота! Не хватает {need}.",
-                reply_markup=shop_menu_keyboard())
+                reply_markup=ReplyKeyboardMarkup([
+                    [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+                    [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+                    [KeyboardButton(BUTTON_GO_BACK)],
+                ], resize_keyboard=True))
     else:
         await update.message.reply_text("Покупка отменена.",
-                                        reply_markup=shop_menu_keyboard())
+                                        reply_markup=ReplyKeyboardMarkup([
+                                            [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+                                            [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+                                            [KeyboardButton(BUTTON_GO_BACK)],
+                                        ], resize_keyboard=True))
     context.user_data.pop("pending_rod",None)
     return ConversationHandler.END
 
@@ -756,7 +793,11 @@ async def buy_bait_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bait_name=update.message.text.strip()
     if bait_name==BUTTON_GO_BACK:
         await update.message.reply_text("Возвращаемся в магазин.",
-                                        reply_markup=shop_menu_keyboard())
+                                        reply_markup=ReplyKeyboardMarkup([
+                                            [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+                                            [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+                                            [KeyboardButton(BUTTON_GO_BACK)],
+                                        ], resize_keyboard=True))
         return ConversationHandler.END
     bait=next((b for b in BAITS if b["name"]==bait_name),None)
     if bait:
@@ -768,7 +809,12 @@ async def buy_bait_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return CONFIRM_BUY_BAIT
     else:
-        await update.message.reply_text("Неизвестная наживка.",reply_markup=shop_menu_keyboard())
+        await update.message.reply_text("Неизвестная наживка.",
+                                        reply_markup=ReplyKeyboardMarkup([
+                                            [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+                                            [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+                                            [KeyboardButton(BUTTON_GO_BACK)],
+                                        ], resize_keyboard=True))
         return ConversationHandler.END
 
 async def confirm_buy_bait_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -776,7 +822,12 @@ async def confirm_buy_bait_handler(update: Update, context: ContextTypes.DEFAULT
     ud=users_data[user.id]
     bait=context.user_data.get("pending_bait")
     if not bait:
-        await update.message.reply_text("Ошибка: нет выбранной наживки.",reply_markup=shop_menu_keyboard())
+        await update.message.reply_text("Ошибка: нет выбранной наживки.",
+                                        reply_markup=ReplyKeyboardMarkup([
+                                            [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+                                            [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+                                            [KeyboardButton(BUTTON_GO_BACK)],
+                                        ], resize_keyboard=True))
         return ConversationHandler.END
     if update.message.text==BUTTON_CONFIRM_YES:
         if ud["gold"]>=bait["price"]:
@@ -788,65 +839,128 @@ async def confirm_buy_bait_handler(update: Update, context: ContextTypes.DEFAULT
             }
             await update.message.reply_text(
                 f"Вы купили {bait['name']}! Теперь ваши шансы могут измениться!",
-                reply_markup=shop_menu_keyboard())
+                reply_markup=ReplyKeyboardMarkup([
+                    [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+                    [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+                    [KeyboardButton(BUTTON_GO_BACK)],
+                ], resize_keyboard=True))
         else:
             need=bait["price"]-ud["gold"]
             await update.message.reply_text(
                 f"Недостаточно золота! Не хватает {need}.",
-                reply_markup=shop_menu_keyboard())
+                reply_markup=ReplyKeyboardMarkup([
+                    [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+                    [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+                    [KeyboardButton(BUTTON_GO_BACK)],
+                ], resize_keyboard=True))
     else:
         await update.message.reply_text("Покупка наживки отменена.",
-                                        reply_markup=shop_menu_keyboard())
+                                        reply_markup=ReplyKeyboardMarkup([
+                                            [KeyboardButton(BUTTON_RODS), KeyboardButton(BUTTON_BAITS)],
+                                            [KeyboardButton(BUTTON_SELL_ALL), KeyboardButton(BUTTON_EXCHANGE_GOLD)],
+                                            [KeyboardButton(BUTTON_GO_BACK)],
+                                        ], resize_keyboard=True))
     context.user_data.pop("pending_bait",None)
     return ConversationHandler.END
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❗ Неизвестная команда. Используйте меню!",
+async def universal_go_back_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Возвращаемся...",reply_markup=main_menu_keyboard())
+
+# Хендлеры для помощи
+async def help_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Что хотите узнать?",
+                                    reply_markup=help_menu_keyboard())
+    return HELP_MENU
+
+async def help_subtopic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topic=update.message.text
+    if topic==BUTTON_GO_BACK:
+        # Вернуться в главное меню помощи
+        await update.message.reply_text("Возвращаемся в меню помощи...",
+                                        reply_markup=help_menu_keyboard())
+        return HELP_MENU
+    # Показать текст по теме
+    txt=help_text(topic)
+    await update.message.reply_text(txt, reply_markup=ReplyKeyboardMarkup([
+        [KeyboardButton(BUTTON_GO_BACK)]
+    ],resize_keyboard=True))
+    return HELP_SUBTOPIC
+
+async def help_go_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Вернуться в главное меню из меню помощи
+    await update.message.reply_text("Возвращаемся в главное меню...",
                                     reply_markup=main_menu_keyboard())
+    return ConversationHandler.END
+
 
 def main():
-    token = "8132081407:AAGSbjptd2JBrVUNOheyvvfC7nwIfMagD4o" # вставьте свой токен
+    token = "8132081407:AAGSbjptd2JBrVUNOheyvvfC7nwIfMagD4o"
     application = ApplicationBuilder().token(token).build()
+    application.bot_data["global_users_data"]=users_data
+
+    # Конверсационный хендлер для помощи
+    help_conv_handler=ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(f"^{re.escape(BUTTON_HELP)}$"), help_main_menu)],
+        states={
+            HELP_MENU:[
+                MessageHandler(filters.Regex(f"^{re.escape(BUTTON_HELP_FISHING)}$|^{re.escape(BUTTON_HELP_RODS)}$|^{re.escape(BUTTON_HELP_BAITS)}$|^{re.escape(BUTTON_HELP_SHOP)}$|^{re.escape(BUTTON_HELP_GUILDS)}$|^{re.escape(BUTTON_HELP_ABOUT)}$"), help_subtopic_handler),
+                MessageHandler(filters.Regex(f"^{re.escape(BUTTON_GO_BACK)}$"), help_go_back_to_main),
+            ],
+            HELP_SUBTOPIC:[
+                MessageHandler(filters.Regex(f"^{re.escape(BUTTON_GO_BACK)}$"), help_main_menu)
+            ]
+        },
+        fallbacks=[MessageHandler(filters.Regex(f"^{re.escape(BUTTON_GO_BACK)}$"), help_go_back_to_main)],
+        allow_reentry=True
+    )
 
     conv_handler = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex(re.escape(BUTTON_START_FISHING)), begin_fishing),
-            MessageHandler(filters.Regex(re.escape(BUTTON_RODS)), rods_section),
-            MessageHandler(filters.Regex(re.escape(BUTTON_BAITS)), baits_section),
-            MessageHandler(filters.Regex(re.escape(BUTTON_EXCHANGE_GOLD)), exchange_gold_handler_func),
-            MessageHandler(filters.Regex(re.escape(BUTTON_LEADERBOARD)), leaderboard_handler_func)
+            MessageHandler(filters.Regex(f"^{re.escape(BUTTON_START_FISHING)}$"), begin_fishing),
+            MessageHandler(filters.Regex(f"^{re.escape(BUTTON_RODS)}$"), rods_section),
+            MessageHandler(filters.Regex(f"^{re.escape(BUTTON_BAITS)}$"), baits_section),
+            MessageHandler(filters.Regex(f"^{re.escape(BUTTON_EXCHANGE_GOLD)}$"), exchange_gold_handler_func),
+            MessageHandler(filters.Regex(f"^{re.escape(BUTTON_LEADERBOARD)}$"), leaderboard_handler_func)
         ],
         states={
-            ASK_NICKNAME:[MessageHandler(filters.TEXT & ~filters.COMMAND,set_nickname)],
-            BUY_ROD:[MessageHandler(filters.TEXT & ~filters.COMMAND,buy_rod_handler)],
+            ASK_NICKNAME:[MessageHandler((filters.TEXT & ~filters.COMMAND),set_nickname)],
+            BUY_ROD:[MessageHandler((filters.TEXT & ~filters.COMMAND),buy_rod_handler)],
             CONFIRM_BUY_ROD:[MessageHandler(filters.Regex(f"^{BUTTON_CONFIRM_YES}$|^{BUTTON_CONFIRM_NO}$"),confirm_buy_rod_handler)],
-            BUY_BAIT:[MessageHandler(filters.TEXT & ~filters.COMMAND,buy_bait_handler)],
+            BUY_BAIT:[MessageHandler((filters.TEXT & ~filters.COMMAND),buy_bait_handler)],
             CONFIRM_BUY_BAIT:[MessageHandler(filters.Regex(f"^{BUTTON_CONFIRM_YES}$|^{BUTTON_CONFIRM_NO}$"),confirm_buy_bait_handler)],
             EXCHANGE:[MessageHandler(filters.Regex(f"^{BUTTON_CONFIRM_YES}$|^{BUTTON_CONFIRM_NO}$"),confirm_exchange_handler)],
             LEADERBOARD_CATEGORY:[
-                MessageHandler(filters.Regex(f"^{BUTTON_TOTAL_GOLD}$|^{BUTTON_TOTAL_KG}$|^{BUTTON_TOTAL_EXPERIENCE}$"),leaderboard_show),
-                MessageHandler(filters.Regex(f"^{BUTTON_GO_BACK}$"), go_back)
+                MessageHandler(filters.Regex(f"^{re.escape(BUTTON_TOTAL_GOLD)}$|^{re.escape(BUTTON_TOTAL_KG)}$|^{re.escape(BUTTON_TOTAL_EXPERIENCE)}$"),leaderboard_show),
+                MessageHandler(filters.Regex(f"^{re.escape(BUTTON_GO_BACK)}$"), go_back)
             ],
         },
         fallbacks=[
-            MessageHandler(filters.Regex(re.escape(BUTTON_GO_BACK)), go_back),
+            MessageHandler(filters.Regex(f"^{re.escape(BUTTON_GO_BACK)}$"), go_back),
             CommandHandler("cancel", cancel_nickname)
         ],
         allow_reentry=True
     )
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.Regex("^"+re.escape(BUTTON_LAKE)+"$"), lake_handler))
-    application.add_handler(MessageHandler(filters.Regex("^"+re.escape(BUTTON_INVENTORY)+"$"), inventory_handler_func))
-    application.add_handler(MessageHandler(filters.Regex("^"+re.escape(BUTTON_SHOP)+"$"), shop_handler_func))
-    application.add_handler(MessageHandler(filters.Regex("^"+re.escape(BUTTON_ABOUT_FISHERMAN)+"$"), about_fisherman_handler))
-    application.add_handler(MessageHandler(filters.Regex("^"+re.escape(BUTTON_CATCH_FISH)+"$"), catch_fish_handler))
-    application.add_handler(MessageHandler(filters.Regex("^"+re.escape(BUTTON_UPDATE)+"$"), update_fishing_status_handler))
-    application.add_handler(MessageHandler(filters.Regex("^"+re.escape(BUTTON_PULL)+"$"), pull_hook_handler))
-    application.add_handler(MessageHandler(filters.Regex("^"+re.escape(BUTTON_IDENTIFY_FISH)+"$"), identify_fish_handler))
-    application.add_handler(MessageHandler(filters.Regex("^"+re.escape(BUTTON_SELL_ALL)+"$"), sell_fish_handler_func))
-
+    application.add_handler(guild_conversation_handler())  
     application.add_handler(conv_handler)
+    application.add_handler(help_conv_handler)
+
+    # Хендлеры для главного меню
+    application.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BUTTON_LAKE)}$"), lake_handler))
+    application.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BUTTON_INVENTORY)}$"), inventory_handler_func))
+    application.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BUTTON_SHOP)}$"), shop_handler_func))
+    application.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BUTTON_ABOUT_FISHERMAN)}$"), about_fisherman_handler))
+    application.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BUTTON_CATCH_FISH)}$"), catch_fish_handler))
+    application.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BUTTON_UPDATE)}$"), update_fishing_status_handler))
+    application.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BUTTON_PULL)}$"), pull_hook_handler))
+    application.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BUTTON_IDENTIFY_FISH)}$"), identify_fish_handler))
+    application.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BUTTON_SELL_ALL)}$"), sell_fish_handler_func))
+
+    # Глобальный хендлер для кнопки Вернуться вне разговоров
+    application.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BUTTON_GO_BACK)}$"), universal_go_back_handler))
+
+    # Хендлер неизвестных сообщений – в самом конце
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     application.run_polling()
