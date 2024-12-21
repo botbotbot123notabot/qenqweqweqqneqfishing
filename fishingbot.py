@@ -82,7 +82,7 @@ FISH_DATA = {
     },
     "rare": {
         "prefixes": ["Средний", "Хороший", "Солидный", "Налитый", "Блестящий", "Взрослый", "Упитанный", "Почти Трофейный"],
-        "names": ["Карась", "Окунь", "Лещ", "Ротан", "Угорь", "Судак"],
+        "names": ["Карась", "Окунь", "Лещ", "Ротан", "Угорёк", "Судак"],  # <-- БЫЛО “Угорь”, теперь “Угорёк”
         "weight_range": (7, 16)
     },
     "legendary": {
@@ -270,36 +270,38 @@ def get_about_fisherman_text(user_id):
             guild_rank_str = get_guild_membership_rank(user_id, guild_id, db)
 
     text = (
-        f"👤 О рыбаке:\n\n"
-        f"Имя: {nickname}\n"
-        f"Уровень: {level}\n"
-        f"Ранг: {rank}\n"
-        f"Опыт: {experience}/{get_required_xp(level)}\n"
-        f"Возраст вашего приключения: {age}\n"
-        f"Любимая удочка: {favorite_rod}\n"
-        f"Любимая наживка: {favorite_bait}\n"
+      "👤 О рыбаке:\n\n"
+        f"📛 Имя: {nickname}\n"
+        f"🏅 Уровень: {level}\n"
+        f"🎖 Ранг: {rank}\n"
+        f"⭐ Опыт: {experience}/{get_required_xp(level)}\n"
+        f"⏳ Возраст вашего приключения: {age}\n"
+        f"🎣 Любимая удочка: {favorite_rod}\n"
+        f"🪱 Любимая наживка: {favorite_bait}\n"
     )
 
     bonus = db.get_bonus(user_id)
     if bonus:
-        end_time=datetime.fromisoformat(bonus["bonus_end"])
-        now=datetime.utcnow()
-        diff=(end_time - now).total_seconds()
+        end_time = datetime.fromisoformat(bonus["bonus_end"])
+        now = datetime.utcnow()
+        diff = (end_time - now).total_seconds()
         if diff>0:
-            remain=int(diff//60)
+            remain = int(diff//60)
             b_name=bonus["bonus_name"]
             b_fs=bonus["bonus_fishing_speed"]
             b_gold=bonus["bonus_gold_percent"]
             b_xp=bonus["bonus_xp_percent"]
-            text += f"\nБонус: {b_name} ({remain} мин) (+{b_fs}% скорость, +{b_xp}% опыт, +{b_gold}% золото)"
+            text += f"\n🐾 Бонус: {b_name} ({remain} мин) (+{b_fs}% к скорости, +{b_xp}% к опыту, +{b_gold}% к золоту)"
 
-    text += f"\n\nГильдия: {guild_str}"
+    text += f"\n\n🛡️ Гильдия: {guild_str}"
     if guild_id is not None and guild_str!="нет":
-        text += f"\nРанг в {guild_str}: {guild_rank_str}"
+        text += f"\n🔰 Ранг в гильдии: {guild_rank_str}"
 
-    text += f"\n\nВсего золота заработано: {total_gold_earned}\nВсего КГ рыбы поймано: {total_kg_caught}\n"
-
-    text += "\nПродолжайте ловить, опознавать и продавать рыбу, чтобы расти в мастерстве!"
+    text += (
+        f"\n\n💰 Всего золота заработано: {total_gold_earned}"
+        f"\n🐟 Всего КГ рыбы поймано: {total_kg_caught}"
+        "\n\nПродолжайте ловить, опознавать и продавать рыбу, чтобы расти в мастерстве!"
+    )
     return text
 
 def get_welcome_text():
@@ -323,20 +325,21 @@ def get_lake_text(user_nickname):
     )
 
 def get_inventory_text(user_id):
-    u=db.get_user(user_id)
-    inv=db.get_inventory(user_id)
-    un=db.get_unidentified(user_id)
-    gold=u[2]
+    u = db.get_user(user_id)
+    inv = db.get_inventory(user_id)
+    un = db.get_unidentified(user_id)
+    gold = u[2]
     rod = u[7] if u[7] else "Бамбуковая удочка 🎣"
-    rod_bonus=u[8] if u[8] else 0
-    bait_name=u[9]
-    bait_end=u[10]
+    rod_bonus = u[8] if u[8] else 0
+    bait_name = u[9]
+    bait_end = u[10]
+
     text = "🎒 Ваш инвентарь:\n\n"
     text += f"🎣 Удочка: {rod} (уменьшение времени на {rod_bonus}%)\n"
     if bait_name and bait_end:
-        end_time=datetime.fromisoformat(bait_end)
-        remaining=int((end_time - datetime.utcnow()).total_seconds()/60)
-        if remaining>0:
+        end_time = datetime.fromisoformat(bait_end)
+        remaining = int((end_time - datetime.utcnow()).total_seconds()/60)
+        if remaining > 0:
             text+=f"🪱 Наживка: {bait_name} (ещё {remaining} мин)\n"
         else:
             text+="🪱 Наживка: нет\n"
@@ -344,26 +347,32 @@ def get_inventory_text(user_id):
         text+="🪱 Наживка: нет\n"
 
     text+="\n"
-    common_count=un['common']
-    rare_count=un['rare']
-    legend_count=un['legendary']
-    if common_count>0:
-        text+=f"• Неопознанные рыбы - {common_count}\n"
-    if rare_count>0:
-        text+=f"• Неопознанные редкие рыбы - {rare_count}\n"
-    if legend_count>0:
-        text+=f"• Неопознанные легендарные рыбы - {legend_count}\n"
-    if common_count==0 and rare_count==0 and legend_count==0:
+    # Неопознанная рыба
+    c=un['common']
+    r=un['rare']
+    l=un['legendary']
+    if c>0:
+        text+=f"• Неопознанные рыбы - {c}\n"
+    if r>0:
+        text+=f"• Неопознанные редкие рыбы - {r}\n"
+    if l>0:
+        text+=f"• Неопознанные легендарные рыбы - {l}\n"
+    if c==0 and r==0 and l==0:
         text+="Нет неопознанной рыбы.\n"
 
     identified_fish = [(k,v) for k,v in inv.items() if v>0 and isinstance(k,tuple)]
+    total_identified_weight = 0
     if identified_fish:
         text+="\nОпознанная рыба:\n"
-        for (fname, w, r), qty in identified_fish:
+        for (fname, w, rar), qty in identified_fish:
             total_w = w*qty
-            text+=f"• {fname} - вес: {w} КГ - {qty} шт. (итого {total_w} КГ)\n"
+            text += f"• {fname} - вес: {w} КГ - {qty} шт. (итого {total_w} КГ)\n"
+            total_identified_weight += total_w
 
-    text += f"\n💰 Золото: {gold}"
+        # После перечисления — показываем общий вес
+        text += f"\nОбщий вес рыбы: {total_identified_weight} КГ"
+
+    text += f"\n\n💰 Золото: {gold}"
     return text
 
 async def set_nickname(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1055,7 +1064,7 @@ def main():
     global db
     db = Database()
 
-    token = "8132081407:AAGSbjptd2JBrVUNOheyvvfC7nwIfMagD4o"
+    token = "7646871331:AAHmQunhNsmblkFQsAzYLee3ko5-nOo62iA"
     application = ApplicationBuilder().token(token).build()
 
     application.bot_data["db"] = db
