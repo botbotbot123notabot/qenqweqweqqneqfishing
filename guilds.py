@@ -1,12 +1,12 @@
 import logging
-from datetime import datetime, timedelta
-from collections import defaultdict
 import re
-
+import sqlite3
+from datetime import datetime
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
     KeyboardButton,
+    ReplyKeyboardRemove,
 )
 from telegram.ext import (
     ContextTypes,
@@ -21,9 +21,9 @@ BUTTON_GUILDS = "🛡️ Гильдии"
 BUTTON_MY_GUILD = "🛡️ Моя Гильдия"
 BUTTON_CREATE_GUILD = "🛡️ Создать гильдию"
 BUTTON_JOIN_GUILD = "🛡️ Вступить в гильдию"
+BUTTON_LEAVE_GUILD = "🚪 Покинуть Гильдию"
 BUTTON_GUILD_SHOP = "🛍️ Гильдейский Магазин"
 BUTTON_GUILD_LEADERS = "🏆 Лидеры Гильдии"
-BUTTON_LEAVE_GUILD = "🚪 Покинуть Гильдию"
 BUTTON_GUILD_MEMBERS = "👥 Участники"
 BUTTON_GUILD_BACK = "🔙 Назад в гильдию"
 
@@ -46,15 +46,6 @@ GUILD_LEAVE_CONFIRM = 108
 GUILD_MEMBERS_MENU = 109
 GUILD_LEADERS_CATEGORY = 110
 
-guilds_data = defaultdict(lambda: {
-    "name": None,
-    "level": 0,
-    "experience": 0,
-    "members": set(),
-    "leader_id": None,
-    "created_time": datetime.utcnow(),
-})
-
 GUILD_LEVELS = {
     1: 27000,
     2: 108000,
@@ -76,6 +67,7 @@ GUILD_BONUSES = {
     7: (33,33)
 }
 
+# Гильдейские предметы
 GUILD_RODS = [
     {"name": "Деревянная удочка", "price": 1000, "bonus_percent": 55, "required_level": 0},
     {"name": "Резная удочка", "price": 2000, "bonus_percent": 70, "required_level": 2},
@@ -86,12 +78,12 @@ GUILD_BAITS = [
     {
         "name": "Майский жук",
         "price": 50,
-        "duration": 60,
-        "probabilities": {"common":40,"rare":57,"legendary":3},
+        "duration":60,
+        "probabilities":{"common":40,"rare":57,"legendary":3},
         "required_level":1
     },
     {
-        "name": "Вяленая рыба",
+        "name":"Вяленая рыба",
         "price":300,
         "duration":60,
         "probabilities":{"common":40,"rare":54,"legendary":6},
@@ -106,15 +98,16 @@ GUILD_BAITS = [
     },
 ]
 
-def get_guild_membership_rank(uid, gid, users_data):
-    g=guilds_data[gid]
+def get_guild_membership_rank(uid, gid, db):
+    g=db.get_guild(gid)
     if g["leader_id"]==uid:
         return "Глава гильдии"
-    ud=users_data[uid]
-    join_time=ud.get("guild_join_time")
+    user = db.get_user(uid)
+    join_time=user[15]
     if not join_time:
         return "Новичок гильдии"
-    delta=datetime.utcnow()-join_time
+    join_dt = datetime.fromisoformat(join_time)
+    delta=datetime.utcnow()-join_dt
     hours=delta.total_seconds()/3600
     if hours<1:
         return "Новичок гильдии"
@@ -131,44 +124,48 @@ def get_guild_membership_rank(uid, gid, users_data):
         return "Гильдейский ветеран"
     return "Член гильдии"
 
-def calculate_guild_rating(gid, users_data):
-    g = guilds_data[gid]
+def calculate_guild_rating(gid, db):
+    g = db.get_guild(gid)
+    members = db.get_guild_members(gid)
     total_gold=0
     total_kg=0
     total_exp=0
-    for uid in g["members"]:
-        ud=users_data[uid]
-        total_gold+=ud["total_gold_earned"]
-        total_kg+=ud["total_kg_caught"]
-        total_exp+=ud["experience"]
+    for uid in members:
+        u=db.get_user(uid)
+        total_gold+=u[12]
+        total_kg+=u[13]
+        total_exp+=u[3]
     rating=(total_gold+total_kg+total_exp)*(1+(g["level"]*0.1))
     return int(rating)
 
-def check_guild_level_up(g):
+def check_guild_level_up(g,db):
     current_level=g["level"]
     while current_level<7:
         required=GUILD_LEVELS[current_level+1]
         if g["experience"]>=required:
-            g["level"]+=1
-            current_level=g["level"]
-            logger.info(f"Guild {g['name']} reached level {current_level}")
+            current_level+=1
+            db.update_guild(g["guild_id"], level=current_level)
+            g["level"]=current_level
         else:
             break
 
-def add_guild_exp(uid, player_exp, users_data):
-    ud=users_data[uid]
-    gid=ud.get("guild_id")
+def add_guild_exp(uid, player_exp, db):
+    u=db.get_user(uid)
+    gid=u[14]
     if gid is None:
         return
-    g=guilds_data[gid]
-    n=len(g["members"])
+    g=db.get_guild(gid)
+    n=len(db.get_guild_members(gid))
     guild_exp_contribution = int(player_exp*100/(n+10))
-    g["experience"]+=guild_exp_contribution
-    check_guild_level_up(g)
+    new_exp = g["experience"]+guild_exp_contribution
+    db.update_guild(gid, experience=new_exp)
+    g["experience"]=new_exp
+    check_guild_level_up(g,db)
 
-def guild_main_menu_keyboard(user_id, users_data):
-    ud = users_data[user_id]
-    if ud.get("guild_id") is None:
+def guild_main_menu_keyboard(user_id, db):
+    u=db.get_user(user_id)
+    gid=u[14]
+    if gid is None:
         return ReplyKeyboardMarkup([
             [KeyboardButton(BUTTON_CREATE_GUILD)],
             [KeyboardButton(BUTTON_JOIN_GUILD)],
@@ -181,12 +178,14 @@ def guild_main_menu_keyboard(user_id, users_data):
             [KeyboardButton(BUTTON_GO_BACK)]
         ], resize_keyboard=True)
 
-def guild_info_text(gid, users_data):
-    g=guilds_data[gid]
+def guild_info_text(gid, db):
+    g=db.get_guild(gid)
+    if not g or g["name"] is None:
+        return "Гильдия не найдена или удалена."
     guild_name=g["name"]
     lvl=g["level"]
     exp=g["experience"]
-    rating=calculate_guild_rating(gid,users_data)
+    rating=calculate_guild_rating(gid,db)
     if lvl<7:
         required=GUILD_LEVELS[lvl+1]
         left=required-exp
@@ -198,10 +197,12 @@ def guild_info_text(gid, users_data):
     else:
         bonuses=f"Опыт: +{exp_bonus}%, Золото: +{gold_bonus}%"
 
-    members_count=len(g["members"])
+    members_count=len(db.get_guild_members(gid))
     leader_id=g["leader_id"]
-    leader_name=users_data[leader_id]["nickname"] if leader_id else "нет"
-    delta=datetime.utcnow()-g["created_time"]
+    leader_user=db.get_user(leader_id)
+    leader_name=leader_user[1] if leader_user[1] else "нет"
+    created_time=datetime.fromisoformat(g["created_time"])
+    delta=datetime.utcnow()-created_time
     days=delta.days
     hours=(delta.seconds//3600)
 
@@ -218,31 +219,37 @@ def guild_info_text(gid, users_data):
     return text
 
 async def guilds_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db=context.application.bot_data["db"]
     user=update.effective_user
-    global_users_data=context.application.bot_data["global_users_data"]
-    ud=global_users_data[user.id]
-    gid=ud.get("guild_id")
-    if gid is None or guilds_data[gid]["name"] is None:
+    u=db.get_user(user.id)
+    gid=u[14]
+    if gid is None:
         await update.message.reply_text(
             "У вас нет гильдии. Создайте или вступите в существующую.",
-            reply_markup=guild_main_menu_keyboard(user.id,global_users_data)
+            reply_markup=guild_main_menu_keyboard(user.id,db)
         )
     else:
-        text=guild_info_text(gid, global_users_data)
+        g= db.get_guild(gid)
+        if g and g["name"] is not None:
+            text=guild_info_text(gid, db)
+        else:
+            text="Гильдия удалена."
         await update.message.reply_text(
             text,
-            reply_markup=guild_main_menu_keyboard(user.id,global_users_data)
+            reply_markup=guild_main_menu_keyboard(user.id,db)
         )
     return GUILD_MENU
 
 async def create_guild(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Без кнопки "Вернуться"
     await update.message.reply_text(
         "Введите название гильдии (до 25 символов):",
-        reply_markup=ReplyKeyboardMarkup([[KeyboardButton(BUTTON_GO_BACK)]],resize_keyboard=True)
+        reply_markup=ReplyKeyboardRemove() 
     )
     return ASK_GUILD_NAME
 
 async def set_guild_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db=context.application.bot_data["db"]
     guild_name = update.message.text.strip()
     if len(guild_name)>25:
         await update.message.reply_text("Название слишком длинное.")
@@ -250,11 +257,7 @@ async def set_guild_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not re.match(r'^[A-Za-zА-Яа-яЁё\s]+$', guild_name):
         await update.message.reply_text("Только буквы и пробелы!")
         return ASK_GUILD_NAME
-    global_users_data=context.application.bot_data["global_users_data"]
-    existing=[g["name"] for g in guilds_data.values() if g["name"]]
-    if guild_name in existing:
-        await update.message.reply_text("Гильдия с таким названием уже есть.")
-        return ASK_GUILD_NAME
+    user=update.effective_user
     context.user_data["new_guild_name"]=guild_name
     await update.message.reply_text(
         f"Создать гильдию '{guild_name}' за 1 золота?",
@@ -263,57 +266,55 @@ async def set_guild_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CONFIRM_CREATE_GUILD
 
 async def confirm_create_guild(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db=context.application.bot_data["db"]
     user=update.effective_user
-    global_users_data=context.application.bot_data["global_users_data"]
-    ud=global_users_data[user.id]
+    u=db.get_user(user.id)
+    gold=u[2]
     guild_name=context.user_data["new_guild_name"]
     if update.message.text=="✅ Да":
-        if ud["gold"]<1:
-            await update.message.reply_text("Недостаточно золота!",reply_markup=guild_main_menu_keyboard(user.id,global_users_data))
+        if gold<1:
+            await update.message.reply_text("Недостаточно золота!",reply_markup=guild_main_menu_keyboard(user.id,db))
             return GUILD_MENU
-        new_id=len(guilds_data)+1
-        guilds_data[new_id]["name"]=guild_name
-        guilds_data[new_id]["level"]=0
-        guilds_data[new_id]["experience"]=0
-        guilds_data[new_id]["members"]=set([user.id])
-        guilds_data[new_id]["leader_id"]=user.id
-        guilds_data[new_id]["created_time"]=datetime.utcnow()
-        ud["guild_id"]=new_id
-        ud["guild_join_time"]=datetime.utcnow()
-        ud["gold"]-=1
-        text=guild_info_text(new_id, global_users_data)
+        gid=db.create_guild(guild_name,user.id)
+        db.update_user(user.id, gold=gold-1, guild_id=gid, guild_join_time=datetime.utcnow().isoformat())
+        text=guild_info_text(gid, db)
         await update.message.reply_text(
             text,
-            reply_markup=guild_main_menu_keyboard(user.id,global_users_data)
+            reply_markup=guild_main_menu_keyboard(user.id,db)
         )
         return GUILD_MENU
     else:
-        await update.message.reply_text("Создание отменено.",reply_markup=guild_main_menu_keyboard(user.id,global_users_data))
+        await update.message.reply_text("Создание отменено.",reply_markup=guild_main_menu_keyboard(user.id,db))
         return GUILD_MENU
 
 async def join_guild(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    all_g=[(gid,g) for gid,g in guilds_data.items() if g["name"]]
-    global_users_data=context.application.bot_data["global_users_data"]
+    db=context.application.bot_data["db"]
+    conn = sqlite3.connect(db.db_path)
+    c=conn.cursor()
+    c.execute("SELECT guild_id,name FROM guilds WHERE name IS NOT NULL")
+    all_g=c.fetchall()
+    conn.close()
+
+    user=update.effective_user
     if not all_g:
         await update.message.reply_text("Нет доступных гильдий.",
-                                        reply_markup=guild_main_menu_keyboard(update.effective_user.id,global_users_data))
+                                        reply_markup=guild_main_menu_keyboard(user.id,db))
         return GUILD_MENU
     text="Существующие гильдии:\n"
-    for gid,g in all_g:
-        text+=f"{g['name']} - {len(g['members'])} участников\n"
-    text+="Выберите гильдию или вернитесь."
-    keyboard=[[KeyboardButton(g["name"])] for gid,g in all_g]
+    for gid,name in all_g:
+        members=db.get_guild_members(gid)
+        text+=f"{name} - {len(members)} участников\n"
+    text+="Выберите гильдию или введите что-то другое, чтобы отменить."
+    keyboard=[[KeyboardButton(name)] for gid,name in all_g]
     keyboard.append([KeyboardButton(BUTTON_GO_BACK)])
     await update.message.reply_text(text,reply_markup=ReplyKeyboardMarkup(keyboard,resize_keyboard=True))
     return GUILD_LIST
 
 async def select_guild_to_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db=context.application.bot_data["db"]
     guild_name=update.message.text.strip()
     user=update.effective_user
-    global_users_data=context.application.bot_data["global_users_data"]
-    ud=global_users_data[user.id]
     if guild_name==BUTTON_GO_BACK:
-        # Возвращаемся - теперь по ТЗ при "Вернуться" с гильдии - главное меню.
         await update.message.reply_text("Возвращаемся...",
                                         reply_markup=ReplyKeyboardMarkup(
                                             [[KeyboardButton("🏞 Озеро"),KeyboardButton("📦 Инвентарь"),KeyboardButton("👤 О рыбаке")],
@@ -321,48 +322,53 @@ async def select_guild_to_join(update: Update, context: ContextTypes.DEFAULT_TYP
                                              [KeyboardButton("🔍 Помощь")]],
                                             resize_keyboard=True))
         return ConversationHandler.END
-    for gid,g in guilds_data.items():
-        if g["name"]==guild_name:
-            context.user_data["join_guild_id"]=gid
-            await update.message.reply_text(
-                f"Вступить в '{guild_name}'?",
-                reply_markup=ReplyKeyboardMarkup([[KeyboardButton("✅ Да"),KeyboardButton("❌ Нет")]],resize_keyboard=True)
-            )
-            return GUILD_CONFIRM_JOIN
-    await update.message.reply_text("Гильдия не найдена.")
-    return GUILD_LIST
+    conn = sqlite3.connect(db.db_path)
+    c=conn.cursor()
+    c.execute("SELECT guild_id FROM guilds WHERE name=?",(guild_name,))
+    row=c.fetchone()
+    conn.close()
+    if row is None:
+        await update.message.reply_text("Гильдия не найдена. Повторите ввод или вернитесь.",
+                                        reply_markup=ReplyKeyboardMarkup([
+                                            [KeyboardButton(BUTTON_GO_BACK)]],resize_keyboard=True))
+        return GUILD_LIST
+    gid=row[0]
+    context.user_data["join_guild_id"]=gid
+    await update.message.reply_text(
+        f"Вступить в '{guild_name}'?",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("✅ Да"),KeyboardButton("❌ Нет")]],resize_keyboard=True)
+    )
+    return GUILD_CONFIRM_JOIN
 
 async def confirm_join_guild(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db=context.application.bot_data["db"]
     user=update.effective_user
-    global_users_data=context.application.bot_data["global_users_data"]
-    ud=global_users_data[user.id]
     if update.message.text=="✅ Да":
         gid=context.user_data["join_guild_id"]
-        g=guilds_data[gid]
-        g["members"].add(user.id)
-        ud["guild_id"]=gid
-        ud["guild_join_time"]=datetime.utcnow()
-        text=guild_info_text(gid, global_users_data)
+        db.add_guild_member(gid,user.id)
+        now = datetime.utcnow().isoformat()
+        db.update_user(user.id, guild_id=gid, guild_join_time=now)
+        text=guild_info_text(gid, db)
         await update.message.reply_text(
             text,
-            reply_markup=guild_main_menu_keyboard(user.id,global_users_data)
+            reply_markup=guild_main_menu_keyboard(user.id,db)
         )
         return GUILD_MENU
     else:
         await update.message.reply_text("Вступление отменено.",
-                                        reply_markup=guild_main_menu_keyboard(user.id,global_users_data))
+                                        reply_markup=guild_main_menu_keyboard(user.id,db))
         return GUILD_MENU
 
 async def leave_guild(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db=context.application.bot_data["db"]
     user=update.effective_user
-    global_users_data=context.application.bot_data["global_users_data"]
-    ud=global_users_data[user.id]
-    if ud.get("guild_id") is None:
+    u=db.get_user(user.id)
+    gid=u[14]
+    if gid is None:
         await update.message.reply_text("Вы не в гильдии.",
-                                        reply_markup=guild_main_menu_keyboard(user.id,global_users_data))
+                                        reply_markup=guild_main_menu_keyboard(user.id,db))
         return GUILD_MENU
-    gid=ud["guild_id"]
-    g=guilds_data[gid]
+    g=db.get_guild(gid)
     await update.message.reply_text(
         f"Покинуть гильдию '{g['name']}'?",
         reply_markup=ReplyKeyboardMarkup([[KeyboardButton("✅ Да"),KeyboardButton("❌ Нет")]],resize_keyboard=True)
@@ -370,52 +376,52 @@ async def leave_guild(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return GUILD_LEAVE_CONFIRM
 
 async def confirm_leave_guild(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db=context.application.bot_data["db"]
     user=update.effective_user
-    global_users_data=context.application.bot_data["global_users_data"]
-    ud=global_users_data[user.id]
-    gid=ud.get("guild_id")
+    u=db.get_user(user.id)
+    gid=u[14]
     if gid is None:
         await update.message.reply_text("Вы не в гильдии.",
-                                        reply_markup=guild_main_menu_keyboard(user.id,global_users_data))
+                                        reply_markup=guild_main_menu_keyboard(user.id,db))
         return GUILD_MENU
-    g=guilds_data[gid]
+    g=db.get_guild(gid)
     if update.message.text=="✅ Да":
-        g["members"].discard(user.id)
+        db.remove_guild_member(gid,user.id)
         if g["leader_id"]==user.id:
-            if len(g["members"])>0:
-                new_leader = next(iter(g["members"]))
-                g["leader_id"]=new_leader
+            members=db.get_guild_members(gid)
+            if members:
+                new_leader = members[0]
+                db.update_guild(gid, leader_id=new_leader)
             else:
-                g["name"]=None
-        ud["guild_id"]=None
-        ud.pop("guild_join_time",None)
+                db.update_guild(gid, name=None)
+        db.update_user(user.id, guild_id=None, guild_join_time=None)
         await update.message.reply_text("Вы покинули гильдию.",
-                                        reply_markup=guild_main_menu_keyboard(user.id,global_users_data))
+                                        reply_markup=guild_main_menu_keyboard(user.id,db))
     else:
         await update.message.reply_text("Вы остались в гильдии.",
-                                        reply_markup=guild_main_menu_keyboard(user.id,global_users_data))
+                                        reply_markup=guild_main_menu_keyboard(user.id,db))
     return GUILD_MENU
 
 async def guild_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db=context.application.bot_data["db"]
     user=update.effective_user
-    global_users_data=context.application.bot_data["global_users_data"]
-    ud=global_users_data[user.id]
-    gid=ud.get("guild_id")
+    u=db.get_user(user.id)
+    gid=u[14]
     if gid is None:
-        await update.message.reply_text("У вас нет гильдии!",reply_markup=guild_main_menu_keyboard(user.id,global_users_data))
+        await update.message.reply_text("У вас нет гильдии!",reply_markup=guild_main_menu_keyboard(user.id,db))
         return GUILD_MENU
-    g=guilds_data[gid]
+    g=db.get_guild(gid)
     guild_level=g["level"]
     guild_name=g["name"]
 
-    text=f"🛍️ Гильдейский Магазин {guild_name}:\n\n"
     rods_available=[rod for rod in GUILD_RODS if guild_level>=rod["required_level"]]
     baits_available=[bait for bait in GUILD_BAITS if guild_level>=bait["required_level"]]
 
+    text=f"🛍️ Гильдейский Магазин {guild_name}:\n\n"
     if rods_available:
         text+="Удочки:\n"
         for rod in rods_available:
-            text+=f"{rod['name']} {guild_name} - {rod['price']} золота (-{rod['bonus_percent']}% время)\n"
+            text+=f"{rod['name']} - {rod['price']} золота (-{rod['bonus_percent']}% время)\n"
         text+="\n"
     if baits_available:
         text+="Наживки:\n"
@@ -428,7 +434,7 @@ async def guild_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text+="\nВыберите предмет или вернитесь."
     keyboard=[]
     for rod in rods_available:
-        keyboard.append([KeyboardButton(f"{rod['name']} {guild_name}")])
+        keyboard.append([KeyboardButton(rod["name"])])
     for bait in baits_available:
         keyboard.append([KeyboardButton(bait["name"])])
 
@@ -437,30 +443,43 @@ async def guild_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return GUILD_SHOP_MENU
 
 async def guild_shop_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    item_name=update.message.text.strip()
+    db=context.application.bot_data["db"]
     user=update.effective_user
-    global_users_data=context.application.bot_data["global_users_data"]
-    ud=global_users_data[user.id]
-    gid=ud["guild_id"]
-    g=guilds_data[gid]
-    guild_name=g["name"]
+    item_name=update.message.text.strip()
 
     if item_name==BUTTON_GUILD_BACK:
-        # Возвращает в меню гильдии
-        # Но теперь при нажатии "Вернуться" с главной страницы гильдии уходим в главное меню
-        # Мы реализуем это в другом месте, а здесь просто вернем к инфо о гильдии
-        text=guild_info_text(gid, global_users_data)
-        await update.message.reply_text(text,reply_markup=guild_main_menu_keyboard(user.id,global_users_data))
-        return GUILD_MENU
+        u=db.get_user(user.id)
+        gid=u[14]
+        if gid is None:
+            await update.message.reply_text("Возвращаемся...",
+                                            reply_markup=ReplyKeyboardMarkup(
+                                                [[KeyboardButton("🏞 Озеро"),KeyboardButton("📦 Инвентарь"),KeyboardButton("👤 О рыбаке")],
+                                                 [KeyboardButton("🏪 Магазин"),KeyboardButton("🏆 Таблица Лидеров"),KeyboardButton("🛡️ Гильдии")],
+                                                 [KeyboardButton("🔍 Помощь")]],
+                                                resize_keyboard=True))
+            return ConversationHandler.END
+        else:
+            text=guild_info_text(gid, db)
+            await update.message.reply_text(text,reply_markup=guild_main_menu_keyboard(user.id,db))
+            return GUILD_MENU
 
-    rods_available=[rod for rod in GUILD_RODS if g["level"]>=rod["required_level"]]
-    baits_available=[bait for bait in GUILD_BAITS if g["level"]>=bait["required_level"]]
+    # Поиск предмета в GUILD_RODS и GUILD_BAITS
+    g=db.get_user(user.id)
+    gid=g[14]
+    if gid is None:
+        await update.message.reply_text("У вас нет гильдии!",
+                                        reply_markup=guild_main_menu_keyboard(user.id,db))
+        return GUILD_MENU
+    G=db.get_guild(gid)
+    guild_level=G["level"]
+
+    rods_available=[rod for rod in GUILD_RODS if guild_level>=rod["required_level"]]
+    baits_available=[bait for bait in GUILD_BAITS if guild_level>=bait["required_level"]]
 
     chosen_item=None
     item_type=None
     for rod in rods_available:
-        full_name=f"{rod['name']} {guild_name}"
-        if full_name==item_name:
+        if rod["name"]==item_name:
             chosen_item=rod
             item_type="rod"
             break
@@ -478,7 +497,7 @@ async def guild_shop_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if item_type=="rod":
         await update.message.reply_text(
-            f"Купить {chosen_item['name']} {guild_name} за {chosen_item['price']} золота?",
+            f"Купить {chosen_item['name']} за {chosen_item['price']} золота?",
             reply_markup=ReplyKeyboardMarkup([[KeyboardButton("✅ Да"),KeyboardButton("❌ Нет")]],resize_keyboard=True)
         )
     else:
@@ -491,39 +510,37 @@ async def guild_shop_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return GUILD_SHOP_CONFIRM
 
 async def guild_shop_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db=context.application.bot_data["db"]
     user=update.effective_user
-    global_users_data=context.application.bot_data["global_users_data"]
-    ud=global_users_data[user.id]
+    u=db.get_user(user.id)
     item=context.user_data["guild_shop_item"]
     item_type=context.user_data["guild_shop_item_type"]
-    gid=ud["guild_id"]
-    g=guilds_data[gid]
+    gid=u[14]
+    g=db.get_guild(gid)
     guild_name=g["name"]
 
     if update.message.text=="✅ Да":
-        if ud["gold"]>=item["price"]:
-            ud["gold"]-=item["price"]
+        if u[2]>=item["price"]:
+            db.update_user(user.id, gold=u[2]-item["price"])
             if item_type=="rod":
-                new_rod={
-                    "name":f"{item['name']} {guild_name}",
-                    "bonus_percent":item["bonus_percent"]
-                }
-                ud["current_rod"]=new_rod
-                await update.message.reply_text(f"Вы купили {new_rod['name']}!",
+                # Покупка удочки
+                db.update_user(user.id, current_rod_name=item["name"], current_rod_bonus=item["bonus_percent"])
+                await update.message.reply_text(f"Вы купили {item['name']}!",
                                                 reply_markup=ReplyKeyboardMarkup([[KeyboardButton(BUTTON_GUILD_BACK)]],resize_keyboard=True))
             else:
+                # Покупка наживки
+                from datetime import datetime, timedelta
                 end_time = datetime.utcnow()+timedelta(minutes=item["duration"])
-                ud["current_bait"]={
-                    "name":item["name"],
-                    "end_time":end_time,
-                    "probabilities":item["probabilities"]
-                }
+                import json
+                db.update_user(user.id, current_bait_name=item["name"],
+                               current_bait_end=end_time.isoformat(),
+                               current_bait_probs=json.dumps(item["probabilities"]))
                 await update.message.reply_text(
                     f"Вы купили наживку {item['name']}!",
                     reply_markup=ReplyKeyboardMarkup([[KeyboardButton(BUTTON_GUILD_BACK)]],resize_keyboard=True)
                 )
         else:
-            need=item["price"]-ud["gold"]
+            need=item["price"]-u[2]
             await update.message.reply_text(f"Недостаточно золота! Не хватает {need}.",
                                             reply_markup=ReplyKeyboardMarkup([[KeyboardButton(BUTTON_GUILD_BACK)]],resize_keyboard=True))
     else:
@@ -534,40 +551,47 @@ async def guild_shop_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return GUILD_SHOP_MENU
 
 async def guild_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db=context.application.bot_data["db"]
     user=update.effective_user
-    global_users_data=context.application.bot_data["global_users_data"]
-    ud=global_users_data[user.id]
-    gid=ud.get("guild_id")
+    u=db.get_user(user.id)
+    gid=u[14]
     if gid is None:
         await update.message.reply_text("Вы не в гильдии.",
-                                        reply_markup=guild_main_menu_keyboard(user.id,global_users_data))
+                                        reply_markup=guild_main_menu_keyboard(user.id,db))
         return GUILD_MENU
-    g=guilds_data[gid]
-    members=list(g["members"])
+    g=db.get_guild(gid)
+    members=db.get_guild_members(gid)
     leader_id=g["leader_id"]
     members.remove(leader_id)
-    members.sort(key=lambda x: global_users_data[x]["guild_join_time"] if global_users_data[x].get("guild_join_time") else datetime.utcnow())
+
+    def jt(uid):
+        uu=db.get_user(uid)
+        if uu[15]:
+            return datetime.fromisoformat(uu[15])
+        return datetime.utcnow()
+
+    members.sort(key=jt)
     members=[leader_id]+members
 
     msg="Список участников гильдии:\n"
     for i,uid_ in enumerate(members,start=1):
-        d=global_users_data[uid_]
-        name=d["nickname"] if d["nickname"] else "Неизвестный"
-        lvl=d["level"]
-        guild_rank=get_guild_membership_rank(uid_,gid,global_users_data)
-        msg+=f"{i}. {name} ({lvl} ур.) - {guild_rank}\n"
+        d=db.get_user(uid_)
+        name=d[1] if d[1] else "Неизвестный"
+        lvl=d[4]
+        rank=get_guild_membership_rank(uid_,gid,db)
+        msg+=f"{i}. {name} ({lvl} ур.) - {rank}\n"
     keyboard=[[KeyboardButton(BUTTON_GUILD_BACK)]]
     await update.message.reply_text(msg,reply_markup=ReplyKeyboardMarkup(keyboard,resize_keyboard=True))
     return GUILD_MEMBERS_MENU
 
 async def not_implemented_leaders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db=context.application.bot_data["db"]
     user=update.effective_user
-    global_users_data=context.application.bot_data["global_users_data"]
-    ud=global_users_data[user.id]
-    gid=ud.get("guild_id")
+    u=db.get_user(user.id)
+    gid=u[14]
     if gid is None:
         await update.message.reply_text("Вы не в гильдии.",
-                                        reply_markup=guild_main_menu_keyboard(user.id,global_users_data))
+                                        reply_markup=guild_main_menu_keyboard(user.id,db))
         return GUILD_MENU
     keyboard=[
         [KeyboardButton(BUTTON_GUILD_LEADERS_GOLD),KeyboardButton(BUTTON_GUILD_LEADERS_KG)],
@@ -579,50 +603,51 @@ async def not_implemented_leaders(update: Update, context: ContextTypes.DEFAULT_
     return GUILD_LEADERS_MENU
 
 async def guild_leaders_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db=context.application.bot_data["db"]
     user=update.effective_user
-    global_users_data=context.application.bot_data["global_users_data"]
-    ud=global_users_data[user.id]
-    gid=ud["guild_id"]
-    g=guilds_data[gid]
-
+    u=db.get_user(user.id)
+    gid=u[14]
+    g=db.get_guild(gid)
     text=update.message.text
-    members=list(g["members"])
+    members=db.get_guild_members(gid)
+
+    users=[]
+    for uid_ in members:
+        uu=db.get_user(uid_)
+        users.append(uu)
+
     if text==BUTTON_GUILD_LEADERS_GOLD:
         cat="золоту"
-        members.sort(key=lambda x: global_users_data[x]["total_gold_earned"],reverse=True)
-        get_val=lambda d: d["total_gold_earned"]
+        users.sort(key=lambda x:x[12],reverse=True)
+        val=lambda d: d[12]
     elif text==BUTTON_GUILD_LEADERS_KG:
         cat="улову"
-        members.sort(key=lambda x: global_users_data[x]["total_kg_caught"],reverse=True)
-        get_val=lambda d: d["total_kg_caught"]
+        users.sort(key=lambda x:x[13],reverse=True)
+        val=lambda d: d[13]
     elif text==BUTTON_GUILD_LEADERS_EXP:
         cat="опыту"
-        members.sort(key=lambda x: global_users_data[x]["experience"],reverse=True)
-        get_val=lambda d: d["experience"]
+        users.sort(key=lambda x:x[3],reverse=True)
+        val=lambda d: d[3]
     elif text==BUTTON_GUILD_BACK:
-        # Возвращаемся в главное меню гильдии
-        text_=guild_info_text(gid,global_users_data)
-        await update.message.reply_text(text_,reply_markup=guild_main_menu_keyboard(user.id,global_users_data))
+        text_=guild_info_text(gid,db)
+        await update.message.reply_text(text_,reply_markup=guild_main_menu_keyboard(user.id,db))
         return GUILD_MENU
     else:
-        text_=guild_info_text(gid,global_users_data)
-        await update.message.reply_text(text_,reply_markup=guild_main_menu_keyboard(user.id,global_users_data))
+        text_=guild_info_text(gid,db)
+        await update.message.reply_text(text_,reply_markup=guild_main_menu_keyboard(user.id,db))
         return GUILD_MENU
 
     msg=f"🏆 Топ по {cat} внутри гильдии:\n"
-    for i,uid_ in enumerate(members[:10], start=1):
-        d=global_users_data[uid_]
-        name=d["nickname"] if d["nickname"] else "Неизвестный рыбак"
-        lvl=d["level"]
-        guild_rank=get_guild_membership_rank(uid_,gid,global_users_data)
-        val=get_val(d)
-        msg+=f"{i}. {name} ({lvl} ур.) - {guild_rank} - {val}\n"
+    for i,d in enumerate(users[:10], start=1):
+        name=d[1] if d[1] else "Неизвестный рыбак"
+        lvl=d[4]
+        rank=get_guild_membership_rank(d[0],gid,db)
+        msg+=f"{i}. {name} ({lvl} ур.) - {rank} - {val(d)}\n"
 
     await update.message.reply_text(msg,reply_markup=ReplyKeyboardMarkup([[KeyboardButton(BUTTON_GUILD_BACK)]],resize_keyboard=True))
     return GUILD_LEADERS_MENU
 
 async def go_back_guild(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # При нажатии "Вернуться" из гильдии - возвращаемся в главное меню.
     await update.message.reply_text("Возвращаемся...",
                                     reply_markup=ReplyKeyboardMarkup(
                                         [[KeyboardButton("🏞 Озеро"),KeyboardButton("📦 Инвентарь"),KeyboardButton("👤 О рыбаке")],
@@ -632,7 +657,6 @@ async def go_back_guild(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def go_back_guild_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Аналогично, "Вернуться" возвращает в главное меню
     await update.message.reply_text("Возвращаемся...",
                                     reply_markup=ReplyKeyboardMarkup(
                                         [[KeyboardButton("🏞 Озеро"),KeyboardButton("📦 Инвентарь"),KeyboardButton("👤 О рыбаке")],
@@ -642,8 +666,10 @@ async def go_back_guild_members(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationHandler.END
 
 def guild_conversation_handler():
+    # Добавляем фильтр, чтобы реагировать и на "Гильдии" и на "Моя Гильдия"
+    guild_entry_filter = filters.Regex(f"^{re.escape(BUTTON_GUILDS)}$|^{re.escape(BUTTON_MY_GUILD)}$")
     return ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex(f"^{BUTTON_GUILDS}$"), guilds_handler)],
+        entry_points=[MessageHandler(guild_entry_filter, guilds_handler)],
         states={
             GUILD_MENU:[
                 MessageHandler(filters.Regex("^"+re.escape(BUTTON_CREATE_GUILD)+"$"), create_guild),
@@ -656,7 +682,7 @@ def guild_conversation_handler():
             ],
             ASK_GUILD_NAME:[
                 MessageHandler((filters.TEXT & ~filters.COMMAND), set_guild_name),
-                MessageHandler(filters.Regex("^"+re.escape(BUTTON_GO_BACK)+"$"), go_back_guild)
+                # Без кнопки Вернуться, так что тут нет хендлера на BUTTON_GO_BACK
             ],
             CONFIRM_CREATE_GUILD:[MessageHandler(filters.Regex("^✅ Да$|^❌ Нет$"), confirm_create_guild)],
             GUILD_LIST:[
