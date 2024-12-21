@@ -1064,7 +1064,7 @@ def main():
     global db
     db = Database()
 
-    token = "7646871331:AAHmQunhNsmblkFQsAzYLee3ko5-nOo62iA"
+    token = "8132081407:AAGSbjptd2JBrVUNOheyvvfC7nwIfMagD4o"
     application = ApplicationBuilder().token(token).build()
 
     application.bot_data["db"] = db
